@@ -2,7 +2,10 @@ package ru.kansktc.week;
 
 import android.app.Activity;
 import android.app.AlertDialog;
-import android.content.Intent;
+import android.webkit.CookieManager;
+import android.webkit.WebResourceRequest;
+import android.webkit.WebView;
+import android.webkit.WebViewClient;
 import android.graphics.Typeface;
 import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
@@ -28,7 +31,10 @@ public class MainActivity extends Activity {
     private int direction;
     private final TimeZone zone = TimeZone.getTimeZone("Asia/Krasnoyarsk");
     private final Calendar date = Calendar.getInstance(zone);
-    private LinearLayout days;
+    private static final String GRADES = BASE + "/grade/report/overview/index.php";
+    private LinearLayout days, scheduleControls, root;
+    private WebView grades;
+    private boolean gradesVisible;
     private ScrollView scroll;
     private TextView week;
     private int generation;
@@ -46,7 +52,7 @@ public class MainActivity extends Activity {
         getWindow().setStatusBarColor(0xff152647);
         getWindow().setNavigationBarColor(0xff152647);
         if (state != null) date.setTimeInMillis(state.getLong("date"));
-        LinearLayout root = column();
+        root = column();
         root.setBackgroundColor(dark ? 0xff101827 : 0xffedf2fb);
         LinearLayout header = column();
         header.setPadding(dp(20), dp(17), dp(20), dp(12));
@@ -67,18 +73,22 @@ public class MainActivity extends Activity {
         title.addView(theme);
         header.addView(title);
         week = label("", 15, 0xffc5d5f2, false);
-        header.addView(week);
+        LinearLayout tabs = new LinearLayout(this);
+        button(tabs, "Расписание", "Расписание", () -> showTab(false));
+        button(tabs, "Оценки", "Оценки и вход в ПроКолледж", () -> showTab(true));
+        header.addView(tabs);
+        scheduleControls = column();
+        header.addView(scheduleControls);
+        scheduleControls.addView(week);
         LinearLayout nav = new LinearLayout(this);
         button(nav, "‹", "Предыдущая неделя", () -> move(-1));
         button(nav, "Сегодня", "Текущая неделя", () -> { date.setTimeInMillis(System.currentTimeMillis()); load(); });
         button(nav, "›", "Следующая неделя", () -> move(1));
-        header.addView(nav);
+        scheduleControls.addView(nav);
         LinearLayout actions = new LinearLayout(this);
         button(actions, "Группа", "Выбрать группу", this::chooseGroup);
         button(actions, "Обновить", "Обновить расписание", this::load);
-        button(actions, "Кабинет", "Войти в ПроКолледж", () ->
-            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(BASE + "/my/"))));
-        header.addView(actions);
+        scheduleControls.addView(actions);
         root.addView(header);
         scroll = new ScrollView(this);
         days = column();
@@ -88,13 +98,60 @@ public class MainActivity extends Activity {
         setContentView(root);
         groupId = getPreferences(MODE_PRIVATE).getString("groupId", "");
         groupName = getPreferences(MODE_PRIVATE).getString("groupName", "");
-        if (groupId.isEmpty()) chooseGroup();
-        else load();
+        load();
+        if (state != null && state.getBoolean("gradesVisible")) showTab(true);
     }
 
     @Override protected void onSaveInstanceState(Bundle state) {
         state.putLong("date", date.getTimeInMillis());
+        state.putBoolean("gradesVisible", gradesVisible);
         super.onSaveInstanceState(state);
+    }
+
+    private void showTab(boolean showGrades) {
+        gradesVisible = showGrades;
+        scheduleControls.setVisibility(showGrades ? View.GONE : View.VISIBLE);
+        scroll.setVisibility(showGrades ? View.GONE : View.VISIBLE);
+        if (showGrades && grades == null) {
+            grades = new WebView(this);
+            grades.getSettings().setJavaScriptEnabled(true);
+            grades.getSettings().setDomStorageEnabled(true);
+            grades.getSettings().setAllowFileAccess(false);
+            grades.getSettings().setAllowContentAccess(false);
+            grades.getSettings().setUseWideViewPort(true);
+            grades.getSettings().setLoadWithOverviewMode(true);
+            grades.getSettings().setBuiltInZoomControls(true);
+            grades.getSettings().setDisplayZoomControls(false);
+            CookieManager.getInstance().setAcceptThirdPartyCookies(grades, false);
+            grades.setWebViewClient(new WebViewClient() {
+                @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                    Uri url = request.getUrl();
+                    return !"https".equals(url.getScheme())
+                        || !"pro.kansk-tc.ru".equalsIgnoreCase(url.getHost())
+                        || (url.getPort() != -1 && url.getPort() != 443);
+                }
+            });
+            root.addView(grades, new LinearLayout.LayoutParams(-1, 0, 1));
+            grades.loadUrl(GRADES);
+        }
+        if (grades != null) grades.setVisibility(showGrades ? View.VISIBLE : View.GONE);
+    }
+
+    @Override public void onBackPressed() {
+        if (gradesVisible) {
+            if (grades.canGoBack()) grades.goBack();
+            else showTab(false);
+        } else {
+            super.onBackPressed();
+        }
+    }
+
+    @Override protected void onDestroy() {
+        if (grades != null) {
+            root.removeView(grades);
+            grades.destroy();
+        }
+        super.onDestroy();
     }
 
     private void move(int direction) {
@@ -147,7 +204,7 @@ public class MainActivity extends Activity {
                                 .apply();
                             load();
                         })
-                        .setCancelable(!groupId.isEmpty())
+                        .setCancelable(true)
                         .create();
                     picker.setOnDismissListener(dialog -> choosingGroup = false);
                     picker.show();
@@ -169,7 +226,9 @@ public class MainActivity extends Activity {
 
     private void load() {
         if (groupId.isEmpty()) {
-            chooseGroup();
+            week.setText("Группа не выбрана");
+            days.removeAllViews();
+            days.addView(label("Нажми «Группа», чтобы открыть расписание.", 16, muted, false));
             return;
         }
         int request = ++generation;
