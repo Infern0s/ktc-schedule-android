@@ -9,6 +9,7 @@ import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Bundle;
 import android.view.View;
+import android.view.animation.PathInterpolator;
 import android.widget.*;
 import org.json.*;
 import java.io.*;
@@ -21,7 +22,10 @@ public class MainActivity extends Activity {
     private String groupId;
     private String groupName;
     private boolean choosingGroup;
-    private static final int INK = 0xff162238, MUTED = 0xff53627b, BLUE = 0xff2556c4;
+    private static final PathInterpolator ENTER = new PathInterpolator(0.2f, 0f, 0f, 1f);
+    private boolean dark;
+    private int ink, muted, accent, surface;
+    private int direction;
     private final TimeZone zone = TimeZone.getTimeZone("Asia/Krasnoyarsk");
     private final Calendar date = Calendar.getInstance(zone);
     private LinearLayout days;
@@ -30,16 +34,38 @@ public class MainActivity extends Activity {
     private int generation;
 
     @Override public void onCreate(Bundle state) {
+        int nightMode = getResources().getConfiguration().uiMode & 0x30;
+        dark = getPreferences(MODE_PRIVATE).getBoolean("darkTheme", nightMode == 0x20);
+        setTheme(dark ? android.R.style.Theme_Material_NoActionBar
+            : android.R.style.Theme_Material_Light_NoActionBar);
         super.onCreate(state);
+        ink = dark ? 0xffedf3ff : 0xff162238;
+        muted = dark ? 0xffaabbd4 : 0xff53627b;
+        accent = dark ? 0xffa9c5ff : 0xff2556c4;
+        surface = dark ? 0xff1a273d : Color.WHITE;
         getWindow().setStatusBarColor(0xff152647);
         getWindow().setNavigationBarColor(0xff152647);
         if (state != null) date.setTimeInMillis(state.getLong("date"));
         LinearLayout root = column();
-        root.setBackgroundColor(0xffedf2fb);
+        root.setBackgroundColor(dark ? 0xff101827 : 0xffedf2fb);
         LinearLayout header = column();
         header.setPadding(dp(20), dp(17), dp(20), dp(12));
         header.setBackgroundColor(0xff152647);
-        header.addView(label("Расписание пар", 27, 0xffffffff, true));
+        LinearLayout title = new LinearLayout(this);
+        title.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        TextView heading = label("Расписание пар", 27, Color.WHITE, true);
+        title.addView(heading, new LinearLayout.LayoutParams(0, -2, 1));
+        Button theme = new Button(this);
+        theme.setAllCaps(false);
+        theme.setText(dark ? "Светлая" : "Тёмная");
+        theme.setContentDescription(dark ? "Включить светлую тему" : "Включить тёмную тему");
+        styleButton(theme);
+        theme.setOnClickListener(v -> {
+            getPreferences(MODE_PRIVATE).edit().putBoolean("darkTheme", !dark).apply();
+            recreate();
+        });
+        title.addView(theme);
+        header.addView(title);
         week = label("", 15, 0xffc5d5f2, false);
         header.addView(week);
         LinearLayout nav = new LinearLayout(this);
@@ -72,6 +98,7 @@ public class MainActivity extends Activity {
     }
 
     private void move(int direction) {
+        this.direction = direction;
         date.add(Calendar.DAY_OF_YEAR, direction * 7);
         load();
     }
@@ -146,6 +173,8 @@ public class MainActivity extends Activity {
             return;
         }
         int request = ++generation;
+        int slideDirection = direction;
+        direction = 0;
         Calendar monday = (Calendar) date.clone();
         monday.add(Calendar.DAY_OF_YEAR, -((monday.get(Calendar.DAY_OF_WEEK) + 5) % 7));
         String start = format("d MMM", monday.getTime());
@@ -161,14 +190,14 @@ public class MainActivity extends Activity {
             try {
                 JSONArray data = fetch("getGroupTimetable", query);
                 runOnUiThread(() -> {
-                    if (request == generation && !isDestroyed()) show(data);
+                    if (request == generation && !isDestroyed()) show(data, slideDirection);
                 });
             } catch (Exception error) {
                 runOnUiThread(() -> {
                     if (request != generation || isDestroyed()) return;
                     days.removeAllViews();
-                    days.addView(label("Не удалось загрузить расписание", 18, INK, true));
-                    days.addView(label("Проверь интернет и нажми «Обновить».", 15, MUTED, false));
+                    days.addView(label("Не удалось загрузить расписание", 18, ink, true));
+                    days.addView(label("Проверь интернет и нажми «Обновить».", 15, muted, false));
                 });
             }
         }).start();
@@ -200,7 +229,7 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void show(JSONArray data) {
+    private void show(JSONArray data, int slideDirection) {
         days.removeAllViews();
         String today = format("yyyy.MM.dd", new Date());
         for (int i = 0; i < data.length(); i++) {
@@ -210,16 +239,19 @@ public class MainActivity extends Activity {
             LinearLayout panel = column();
             panel.setPadding(0, dp(4), 0, dp(12));
             panel.addView(label(day.optString("dayName") + "  ·  " + dayDate
-                + (today.equals(dayDate) ? "  ·  Сегодня" : ""), 18, BLUE, true));
+                + (today.equals(dayDate) ? "  ·  Сегодня" : ""), 18, accent, true));
             JSONArray slots = day.optJSONArray("lessons");
             int count = addLessons(panel, slots);
-            if (count == 0) panel.addView(label("Пар нет", 15, MUTED, false));
+            if (count == 0) panel.addView(label("Пар нет", 15, muted, false));
             days.addView(panel);
             panel.setAlpha(0);
-            panel.setTranslationY(dp(16));
-            panel.animate().alpha(1).translationY(0).setStartDelay(i * 45L).setDuration(240).start();
+            panel.setTranslationY(dp(10));
+            panel.setTranslationX(dp(20) * slideDirection);
+            panel.animate().alpha(1).translationX(0).translationY(0)
+                .setInterpolator(ENTER).setStartDelay(Math.min(i * 28L, 112L))
+                .setDuration(380).start();
         }
-        if (days.getChildCount() == 0) days.addView(label("На этой неделе расписания нет", 18, INK, true));
+        if (days.getChildCount() == 0) days.addView(label("На этой неделе расписания нет", 18, ink, true));
     }
 
     private int addLessons(LinearLayout panel, JSONArray slots) {
@@ -240,19 +272,19 @@ public class MainActivity extends Activity {
         LinearLayout card = column();
         card.setPadding(dp(15), dp(12), dp(15), dp(12));
         GradientDrawable background = new GradientDrawable();
-        background.setColor(Color.WHITE);
+        background.setColor(surface);
         background.setCornerRadius(dp(16));
         card.setBackground(background);
         String time = item.optString("lesson") + "-я пара  ·  "
             + item.optString("lesson_start") + "–" + item.optString("lesson_end");
         String cancellation = item.optString("cancel", "");
         if (!cancellation.isEmpty() && !cancellation.equals("0") && !cancellation.equals("false")) time += "  ·  Отмена";
-        card.addView(label(time, 13, BLUE, true));
-        card.addView(label(item.optString("discipline"), 17, INK, true));
+        card.addView(label(time, 13, accent, true));
+        card.addView(label(item.optString("discipline"), 17, ink, true));
         String teacher = item.optString("lastname", "");
         String room = item.optString("classroom", "");
         if (!room.isEmpty()) teacher += (teacher.isEmpty() ? "" : "  ·  ") + "Ауд. " + room;
-        if (!teacher.isEmpty()) card.addView(label(teacher, 14, MUTED, false));
+        if (!teacher.isEmpty()) card.addView(label(teacher, 14, muted, false));
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
         params.topMargin = dp(8);
         panel.addView(card, params);
@@ -278,10 +310,15 @@ public class MainActivity extends Activity {
         view.setText(title);
         view.setContentDescription(description);
         view.setAllCaps(false);
-        view.setTextColor(0xffffffff);
-        view.setBackgroundTintList(android.content.res.ColorStateList.valueOf(0xff294674));
+        styleButton(view);
         row.addView(view, new LinearLayout.LayoutParams(0, -2, 1));
         view.setOnClickListener(v -> action.run());
+    }
+
+    private void styleButton(Button view) {
+        view.setTextColor(Color.WHITE);
+        view.setBackgroundTintList(android.content.res.ColorStateList.valueOf(
+            dark ? 0xff263b5e : 0xff294674));
     }
 
     private int dp(int value) {
