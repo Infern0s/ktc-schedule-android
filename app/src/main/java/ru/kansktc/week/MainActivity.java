@@ -9,6 +9,9 @@ import android.webkit.WebViewClient;
 import android.graphics.Typeface;
 import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.RippleDrawable;
+import android.content.res.ColorStateList;
+import android.view.Gravity;
 import android.net.Uri;
 import android.os.Bundle;
 import android.view.View;
@@ -34,6 +37,16 @@ public class MainActivity extends Activity {
     private static final String GRADES = BASE + "/grade/report/overview/index.php";
     private LinearLayout days, scheduleControls, root;
     private WebView grades;
+    private LinearLayout gradePanel;
+    private String logoutUrl = "";
+    private String courseTitle = "";
+    private String journalUrl = GRADES;
+    private boolean openLoginAfterLogout;
+    private boolean logoutPending;
+    private boolean webVisible;
+    private boolean dayOnly;
+    private Button dayMode, weekMode;
+    private LinearLayout weekNav;
     private boolean gradesVisible;
     private ScrollView scroll;
     private final List<LessonHighlight> lessonHighlights = new ArrayList<>();
@@ -81,12 +94,15 @@ public class MainActivity extends Activity {
         surface = dark ? 0xff1a273d : Color.WHITE;
         getWindow().setStatusBarColor(0xff152647);
         getWindow().setNavigationBarColor(0xff152647);
-        if (state != null) date.setTimeInMillis(state.getLong("date"));
+        dayOnly = getPreferences(MODE_PRIVATE).getBoolean("dayOnly", false);
+        if (state != null && !dayOnly) date.setTimeInMillis(state.getLong("date"));
         root = column();
         root.setBackgroundColor(dark ? 0xff101827 : 0xffedf2fb);
         LinearLayout header = column();
         header.setPadding(dp(20), dp(17), dp(20), dp(12));
-        header.setBackgroundColor(0xff152647);
+        header.setBackground(new GradientDrawable(GradientDrawable.Orientation.TL_BR,
+            dark ? new int[]{0xff172846, 0xff101e33} : new int[]{0xff344f86, 0xff1b3054}));
+        header.setElevation(dp(5));
         LinearLayout title = new LinearLayout(this);
         title.setGravity(android.view.Gravity.CENTER_VERTICAL);
         TextView heading = label("Расписание пар", 27, Color.WHITE, true);
@@ -110,18 +126,28 @@ public class MainActivity extends Activity {
         scheduleControls = column();
         header.addView(scheduleControls);
         scheduleControls.addView(week);
+        LinearLayout period = new LinearLayout(this);
+        dayMode = button(period, "Сегодня", "Показать пары на сегодня", () -> selectPeriod(true));
+        weekMode = button(period, "Неделя", "Показать пары на неделю", () -> selectPeriod(false));
+        dayMode.setSelected(dayOnly);
+        weekMode.setSelected(!dayOnly);
+        scheduleControls.addView(period);
         LinearLayout nav = new LinearLayout(this);
         button(nav, "‹", "Предыдущая неделя", () -> move(-1));
         button(nav, "Сегодня", "Текущая неделя", () -> { date.setTimeInMillis(System.currentTimeMillis()); load(); });
         button(nav, "›", "Следующая неделя", () -> move(1));
         scheduleControls.addView(nav);
+        nav.setVisibility(dayOnly ? View.GONE : View.VISIBLE);
+        weekNav = nav;
         LinearLayout actions = new LinearLayout(this);
         button(actions, "Группа", "Выбрать группу", this::chooseGroup);
         button(actions, "Обновить", "Обновить расписание", this::load);
         scheduleControls.addView(actions);
         root.addView(header);
         scroll = new ScrollView(this);
+        scroll.setClipToPadding(false);
         days = column();
+        days.setClipChildren(false);
         days.setPadding(dp(16), dp(12), dp(16), dp(24));
         scroll.addView(days);
         root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
@@ -142,39 +168,218 @@ public class MainActivity extends Activity {
         gradesVisible = showGrades;
         scheduleControls.setVisibility(showGrades ? View.GONE : View.VISIBLE);
         scroll.setVisibility(showGrades ? View.GONE : View.VISIBLE);
-        if (showGrades && grades == null) {
-            grades = new WebView(this);
-            grades.getSettings().setJavaScriptEnabled(true);
-            grades.getSettings().setDomStorageEnabled(true);
-            grades.getSettings().setAllowFileAccess(false);
-            grades.getSettings().setAllowContentAccess(false);
-            grades.getSettings().setUseWideViewPort(true);
-            grades.getSettings().setLoadWithOverviewMode(true);
-            grades.getSettings().setBuiltInZoomControls(true);
-            grades.getSettings().setDisplayZoomControls(false);
-            CookieManager.getInstance().setAcceptThirdPartyCookies(grades, false);
-            grades.setWebViewClient(new WebViewClient() {
-                @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-                    Uri url = request.getUrl();
-                    return !"https".equals(url.getScheme())
-                        || !"pro.kansk-tc.ru".equalsIgnoreCase(url.getHost())
-                        || (url.getPort() != -1 && url.getPort() != 443);
-                }
-            });
-            root.addView(grades, new LinearLayout.LayoutParams(-1, 0, 1));
-            grades.loadUrl(GRADES);
-        }
-        if (grades != null) grades.setVisibility(showGrades ? View.VISIBLE : View.GONE);
+        if (showGrades && grades == null) createGradeViews();
+        if (gradePanel != null) gradePanel.setVisibility(showGrades && !webVisible ? View.VISIBLE : View.GONE);
+        if (grades != null) grades.setVisibility(showGrades && webVisible ? View.VISIBLE : View.GONE);
         if (!showGrades) refreshHighlights();
     }
 
-    @Override public void onBackPressed() {
-        if (gradesVisible) {
-            if (grades.canGoBack()) grades.goBack();
-            else showTab(false);
-        } else {
-            super.onBackPressed();
+    private void createGradeViews() {
+        gradePanel = column();
+        root.addView(gradePanel, new LinearLayout.LayoutParams(-1, 0, 1));
+        grades = new WebView(this);
+        if (android.os.Build.VERSION.SDK_INT >= 26) grades.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_YES);
+        grades.getSettings().setJavaScriptEnabled(true);
+        grades.getSettings().setDomStorageEnabled(true);
+        grades.getSettings().setAllowFileAccess(false);
+        grades.getSettings().setAllowContentAccess(false);
+        grades.getSettings().setUseWideViewPort(true);
+        grades.getSettings().setLoadWithOverviewMode(true);
+        grades.getSettings().setBuiltInZoomControls(true);
+        grades.getSettings().setDisplayZoomControls(false);
+        CookieManager.getInstance().setAcceptThirdPartyCookies(grades, false);
+        grades.setWebViewClient(new WebViewClient() {
+            @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                return !isCollegeUrl(request.getUrl());
+            }
+
+            @Override public void onPageFinished(WebView view, String url) {
+                inspectGradePage(view, url);
+            }
+
+            @Override public void onReceivedError(WebView view, WebResourceRequest request,
+                                                   android.webkit.WebResourceError error) {
+                if (request.isForMainFrame()) gradeMessage("Не удалось открыть журнал", "Повторить",
+                    () -> loadJournal(journalUrl));
+            }
+        });
+        root.addView(grades, new LinearLayout.LayoutParams(-1, 0, 1));
+        loadJournal(GRADES);
+    }
+
+    private boolean isCollegeUrl(Uri url) {
+        return "https".equals(url.getScheme()) && "pro.kansk-tc.ru".equalsIgnoreCase(url.getHost())
+            && (url.getPort() == -1 || url.getPort() == 443);
+    }
+
+    private void gradeMessage(String message, String action, Runnable callback) {
+        setWebVisible(false);
+        gradePanel.removeAllViews();
+        gradePanel.setGravity(Gravity.CENTER);
+        TextView title = label(message, 18, ink, true);
+        title.setGravity(Gravity.CENTER);
+        gradePanel.addView(title);
+        Button button = new Button(this);
+        button.setAllCaps(false);
+        button.setText(action);
+        styleButton(button);
+        button.setOnClickListener(v -> callback.run());
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-2, -2);
+        params.topMargin = dp(12);
+        gradePanel.addView(button, params);
+    }
+
+    private void setWebVisible(boolean visible) {
+        webVisible = visible;
+        grades.setVisibility(gradesVisible && visible ? View.VISIBLE : View.GONE);
+        gradePanel.setVisibility(gradesVisible && !visible ? View.VISIBLE : View.GONE);
+    }
+
+    private void loadJournal(String url) {
+        journalUrl = url;
+        gradeMessage("Загрузка оценок…", "Обновить", () -> grades.reload());
+        grades.loadUrl(url);
+    }
+
+    private void openLogin() {
+        setWebVisible(true);
+        grades.loadUrl(BASE + "/login/index.php");
+    }
+
+    private void inspectGradePage(WebView view, String address) {
+        Uri url = Uri.parse(address);
+        if (!isCollegeUrl(url) || !address.equals(view.getUrl())) return;
+        String path = url.getPath();
+        if (path == null || path.startsWith("/mod/")) return;
+        if (path.equals("/login/logout.php")) return;
+        String read = "(function(){"
+            + "let login=!!document.querySelector('form input[type=password]');"
+            + "let logout=document.querySelector('a[href*=\"/login/logout.php\"]');"
+            + "let overview=document.querySelector('#overview-grade');"
+            + "let detail=document.querySelector('table.user-grade');"
+            + "let rows=[];"
+            + "if(overview) for(let row of overview.querySelectorAll('tbody tr')){"
+            + "let cells=row.cells,a=cells[0]&&cells[0].querySelector('a');"
+            + "if(a&&cells.length>=2)rows.push({name:a.innerText,grade:cells[1].innerText,url:a.href});}"
+            + "if(detail) for(let row of detail.querySelectorAll('tbody tr')){"
+            + "let item=row.querySelector('.column-itemname.item'),g=row.querySelector('.column-grade');"
+            + "if(item&&g){let a=item.querySelector('a[href*=\"/mod/\"]');"
+            + "rows.push({name:item.innerText,grade:g.innerText,url:a?a.href:''});}}"
+            + "return {login:login,logout:logout?logout.href:'',kind:overview?'overview':detail?'detail':'',rows:rows};"
+            + "})()";
+        view.evaluateJavascript(read, value -> {
+            if (isDestroyed() || !address.equals(view.getUrl()) || value == null || value.equals("null")) return;
+            try {
+                JSONObject page = new JSONObject(value);
+                String logout = page.optString("logout");
+                if (!logout.isEmpty() && isCollegeUrl(Uri.parse(logout))) logoutUrl = logout;
+                String kind = page.optString("kind");
+                if (logoutPending && logout.isEmpty()) {
+                    logoutPending = false;
+                    if (openLoginAfterLogout) openLogin();
+                    else gradeMessage("Войди, чтобы увидеть оценки", "Выполнить вход", this::openLogin);
+                    openLoginAfterLogout = false;
+                } else if (page.optBoolean("login")) {
+                    if (!webVisible) gradeMessage("Войди, чтобы увидеть оценки", "Выполнить вход", this::openLogin);
+                } else if (!kind.isEmpty()) {
+                    renderGrades(page.getJSONArray("rows"), kind.equals("detail"));
+                } else if (webVisible && !logout.isEmpty()) {
+                    loadJournal(GRADES);
+                } else if (!webVisible && !logout.isEmpty()) {
+                    gradeMessage("Журнал пока недоступен", "Повторить", () -> loadJournal(GRADES));
+                } else if (!webVisible) {
+                    gradeMessage("Войди, чтобы увидеть оценки", "Выполнить вход", this::openLogin);
+                }
+            } catch (JSONException error) {
+                if (!webVisible) gradeMessage("Не удалось прочитать журнал", "Повторить", () -> loadJournal(GRADES));
+            }
+        });
+    }
+
+    private void renderGrades(JSONArray rows, boolean detail) {
+        setWebVisible(false);
+        gradePanel.removeAllViews();
+        gradePanel.setGravity(Gravity.NO_GRAVITY);
+        gradePanel.setPadding(dp(12), dp(8), dp(12), dp(8));
+        LinearLayout actions = new LinearLayout(this);
+        if (detail) button(actions, "Все предметы", "Вернуться к предметам", () -> loadJournal(GRADES));
+        button(actions, "Сменить", "Сменить аккаунт", () -> signOut(true));
+        button(actions, "Выйти", "Выйти из аккаунта", () -> signOut(false));
+        gradePanel.addView(actions);
+        ScrollView gradeScroll = new ScrollView(this);
+        LinearLayout table = column();
+        table.setPadding(dp(3), dp(8), dp(3), dp(12));
+        if (detail) table.addView(label(courseTitle, 20, ink, true));
+        table.addView(gradeRow(detail ? "Задание" : "Предмет", "Оценка", true));
+        for (int i = 0; i < rows.length(); i++) {
+            JSONObject item = rows.optJSONObject(i);
+            if (item == null) continue;
+            String name = item.optString("name").trim();
+            String url = item.optString("url");
+            LinearLayout row = gradeRow(name, item.optString("grade").trim(), false);
+            if (isCollegeUrl(Uri.parse(url))) {
+                row.setOnClickListener(v -> {
+                    if (detail) {
+                        setWebVisible(true);
+                        grades.loadUrl(url);
+                    } else {
+                        courseTitle = name;
+                        loadJournal(url);
+                    }
+                });
+            }
+            table.addView(row);
         }
+        if (rows.length() == 0) table.addView(label("Оценок пока нет", 16, muted, false));
+        gradeScroll.addView(table);
+        gradePanel.addView(gradeScroll, new LinearLayout.LayoutParams(-1, 0, 1));
+    }
+
+    private LinearLayout gradeRow(String name, String grade, boolean heading) {
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(12), dp(10), dp(12), dp(10));
+        GradientDrawable background = new GradientDrawable();
+        background.setColor(heading ? (dark ? 0xff273855 : 0xffdbe8ff) : surface);
+        background.setCornerRadius(dp(12));
+        row.setBackground(new RippleDrawable(ColorStateList.valueOf(0x337698dc), background, null));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
+        params.bottomMargin = dp(6);
+        row.setLayoutParams(params);
+        row.addView(label(name, 15, ink, heading), new LinearLayout.LayoutParams(0, -2, 1));
+        TextView score = label(grade.isEmpty() ? "—" : grade, 15, accent, true);
+        score.setGravity(Gravity.END);
+        score.setPadding(dp(8), 0, 0, 0);
+        row.addView(score, new LinearLayout.LayoutParams(dp(85), -2));
+        return row;
+    }
+
+    private void signOut(boolean switchAccount) {
+        String target = logoutUrl;
+        logoutUrl = "";
+        courseTitle = "";
+        journalUrl = GRADES;
+        openLoginAfterLogout = switchAccount;
+        gradeMessage("Завершение сеанса…", "Повторить", () -> signOut(switchAccount));
+        if (isCollegeUrl(Uri.parse(target))) {
+            logoutPending = true;
+            grades.loadUrl(target);
+        } else {
+            CookieManager.getInstance().removeAllCookies(removed -> {
+                if (isDestroyed()) return;
+                logoutPending = false;
+                openLoginAfterLogout = false;
+                if (switchAccount) openLogin();
+                else gradeMessage("Войди, чтобы увидеть оценки", "Выполнить вход", this::openLogin);
+            });
+        }
+    }
+
+    @Override public void onBackPressed() {
+        if (gradesVisible && webVisible) loadJournal(journalUrl);
+        else if (gradesVisible && !journalUrl.equals(GRADES)) loadJournal(GRADES);
+        else if (gradesVisible) showTab(false);
+        else super.onBackPressed();
     }
 
     @Override protected void onResume() {
@@ -193,6 +398,16 @@ public class MainActivity extends Activity {
             grades.destroy();
         }
         super.onDestroy();
+    }
+
+    private void selectPeriod(boolean today) {
+        dayOnly = today;
+        getPreferences(MODE_PRIVATE).edit().putBoolean("dayOnly", today).apply();
+        dayMode.setSelected(today);
+        weekMode.setSelected(!today);
+        weekNav.setVisibility(today ? View.GONE : View.VISIBLE);
+        date.setTimeInMillis(System.currentTimeMillis());
+        load();
     }
 
     private void move(int direction) {
@@ -272,6 +487,7 @@ public class MainActivity extends Activity {
             days.addView(label("Нажми «Группа», чтобы открыть расписание.", 16, muted, false));
             return;
         }
+        if (dayOnly) date.setTimeInMillis(System.currentTimeMillis());
         int request = ++generation;
         int slideDirection = direction;
         direction = 0;
@@ -280,7 +496,7 @@ public class MainActivity extends Activity {
         String start = format("d MMM", monday.getTime());
         monday.add(Calendar.DAY_OF_YEAR, 6);
         String range = start + " – " + format("d MMM yyyy", monday.getTime());
-        week.setText(groupName + "  ·  " + range);
+        week.setText(groupName + "  ·  " + (dayOnly ? format("d MMMM", date.getTime()) : range));
         days.removeAllViews();
         lessonHighlights.clear();
         dayHeadings.clear();
@@ -341,7 +557,9 @@ public class MainActivity extends Activity {
             JSONObject day = data.optJSONObject(i);
             if (day == null) continue;
             String dayDate = day.optString("date");
+            if (dayOnly && !today.equals(dayDate)) continue;
             LinearLayout panel = column();
+            panel.setClipChildren(false);
             panel.setPadding(0, dp(4), 0, dp(12));
             TextView heading = label(day.optString("dayName") + "  ·  " + dayDate, 18, accent, true);
             heading.setTag(dayDate);
@@ -360,7 +578,7 @@ public class MainActivity extends Activity {
                 .setInterpolator(ENTER).setStartDelay(Math.min(i * 28L, 112L))
                 .setDuration(380).start();
         }
-        if (days.getChildCount() == 0) days.addView(label("На этой неделе расписания нет", 18, ink, true));
+        if (days.getChildCount() == 0) days.addView(label(dayOnly ? "Сегодня пар нет" : "На этой неделе расписания нет", 18, ink, true));
         displayedToday = null;
         refreshHighlights();
         if (todayPanel != null && !gradesVisible) {
@@ -412,7 +630,9 @@ public class MainActivity extends Activity {
         LinearLayout card = column();
         card.setPadding(dp(15), dp(12), dp(15), dp(12));
         GradientDrawable background = new GradientDrawable();
-        background.setColor(surface);
+        background.setColors(new int[]{dark ? 0xff223149 : Color.WHITE, surface});
+        background.setStroke(dp(1), dark ? 0xff34455f : 0xffdce7f5);
+        card.setElevation(dp(4));
         background.setCornerRadius(dp(16));
         card.setBackground(background);
         String time = item.optString("lesson") + "-я пара  ·  "
@@ -482,8 +702,10 @@ public class MainActivity extends Activity {
                 && minute >= lesson.start && minute < lesson.end;
             if (active == lesson.active) continue;
             lesson.active = active;
-            lesson.background.setColor(active ? (dark ? 0xff233d52 : 0xffe0f3ed) : surface);
-            lesson.background.setStroke(active ? dp(1) : 0, dark ? 0xff6dbfa6 : 0xff377e6a);
+            lesson.background.setColors(active ? new int[]{dark ? 0xff2a4760 : 0xffeffdf8, dark ? 0xff233d52 : 0xffe0f3ed}
+                : new int[]{dark ? 0xff223149 : Color.WHITE, surface});
+            lesson.background.setStroke(dp(1), active ? (dark ? 0xff6dbfa6 : 0xff377e6a)
+                : (dark ? 0xff34455f : 0xffdce7f5));
             lesson.time.setText(active ? lesson.label + "  ·  Идёт сейчас" : lesson.label);
             float scale = active ? 1.025f : 1f;
             lesson.card.animate().scaleX(scale).scaleY(scale).setDuration(240)
@@ -522,20 +744,38 @@ public class MainActivity extends Activity {
         return view;
     }
 
-    private void button(LinearLayout row, String title, String description, Runnable action) {
+    private Button button(LinearLayout row, String title, String description, Runnable action) {
         Button view = new Button(this);
         view.setText(title);
         view.setContentDescription(description);
         view.setAllCaps(false);
         styleButton(view);
-        row.addView(view, new LinearLayout.LayoutParams(0, -2, 1));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, -2, 1);
+        params.setMargins(dp(3), dp(4), dp(3), dp(4));
+        row.addView(view, params);
         view.setOnClickListener(v -> action.run());
+        return view;
     }
 
     private void styleButton(Button view) {
         view.setTextColor(Color.WHITE);
-        view.setBackgroundTintList(android.content.res.ColorStateList.valueOf(
-            dark ? 0xff263b5e : 0xff294674));
+        view.setBackgroundTintList(null);
+        view.setMinHeight(dp(40));
+        view.setMinimumHeight(dp(40));
+        view.setPadding(dp(7), dp(7), dp(7), dp(7));
+        view.setElevation(dp(2));
+        android.graphics.drawable.StateListDrawable states = new android.graphics.drawable.StateListDrawable();
+        states.addState(new int[]{android.R.attr.state_selected}, glass(0xff5779b6, 0xff304e83));
+        states.addState(new int[0], glass(0xe0476088, 0xe0263a60));
+        view.setBackground(new RippleDrawable(ColorStateList.valueOf(0x55ffffff), states, null));
+    }
+
+    private GradientDrawable glass(int top, int bottom) {
+        GradientDrawable shape = new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
+            new int[]{top, bottom});
+        shape.setCornerRadius(dp(13));
+        shape.setStroke(dp(1), 0x60c5daff);
+        return shape;
     }
 
     private int dp(int value) {
