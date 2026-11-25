@@ -1,6 +1,7 @@
 package ru.kansktc.week;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.Intent;
 import android.graphics.Typeface;
 import android.graphics.Color;
@@ -17,7 +18,9 @@ import java.util.*;
 
 public class MainActivity extends Activity {
     private static final String BASE = "https://pro.kansk-tc.ru";
-    private static final String GROUP = "312";
+    private String groupId;
+    private String groupName;
+    private boolean choosingGroup;
     private static final int INK = 0xff162238, MUTED = 0xff53627b, BLUE = 0xff2556c4;
     private final TimeZone zone = TimeZone.getTimeZone("Asia/Krasnoyarsk");
     private final Calendar date = Calendar.getInstance(zone);
@@ -45,6 +48,7 @@ public class MainActivity extends Activity {
         button(nav, "›", "Следующая неделя", () -> move(1));
         header.addView(nav);
         LinearLayout actions = new LinearLayout(this);
+        button(actions, "Группа", "Выбрать группу", this::chooseGroup);
         button(actions, "Обновить", "Обновить расписание", this::load);
         button(actions, "Кабинет", "Войти в ПроКолледж", () ->
             startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(BASE + "/my/"))));
@@ -56,7 +60,10 @@ public class MainActivity extends Activity {
         scroll.addView(days);
         root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
         setContentView(root);
-        load();
+        groupId = getPreferences(MODE_PRIVATE).getString("groupId", "");
+        groupName = getPreferences(MODE_PRIVATE).getString("groupName", "");
+        if (groupId.isEmpty()) chooseGroup();
+        else load();
     }
 
     @Override protected void onSaveInstanceState(Bundle state) {
@@ -75,23 +82,86 @@ public class MainActivity extends Activity {
         return format.format(value);
     }
 
+    private void chooseGroup() {
+        if (choosingGroup) return;
+        choosingGroup = true;
+        if (groupId.isEmpty()) week.setText("Выбери свою группу");
+        ProgressBar loading = new ProgressBar(this);
+        AlertDialog lookup = new AlertDialog.Builder(this)
+            .setTitle("Загружаю группы")
+            .setView(loading)
+            .setCancelable(false)
+            .show();
+        new Thread(() -> {
+            try {
+                JSONArray groups = fetch("getGroups", "");
+                List<JSONObject> entries = new ArrayList<>();
+                for (int i = 0; i < groups.length(); i++) {
+                    JSONObject group = groups.optJSONObject(i);
+                    if (group != null && group.optString("id").matches("[0-9]+")
+                            && !group.optString("name").isEmpty()) entries.add(group);
+                }
+                if (entries.isEmpty()) throw new IOException("Group list is empty");
+                Collections.sort(entries, (first, second) -> first.optString("name").compareTo(second.optString("name")));
+                CharSequence[] names = new CharSequence[entries.size()];
+                for (int i = 0; i < entries.size(); i++) names[i] = entries.get(i).optString("name");
+                runOnUiThread(() -> {
+                    if (isDestroyed() || isFinishing()) return;
+                    lookup.dismiss();
+                    AlertDialog picker = new AlertDialog.Builder(this)
+                        .setTitle("Выбери группу")
+                        .setItems(names, (dialog, position) -> {
+                            JSONObject group = entries.get(position);
+                            groupId = group.optString("id");
+                            groupName = group.optString("name");
+                            getPreferences(MODE_PRIVATE).edit()
+                                .putString("groupId", groupId)
+                                .putString("groupName", groupName)
+                                .apply();
+                            load();
+                        })
+                        .setCancelable(!groupId.isEmpty())
+                        .create();
+                    picker.setOnDismissListener(dialog -> choosingGroup = false);
+                    picker.show();
+                });
+            } catch (Exception error) {
+                runOnUiThread(() -> {
+                    if (isDestroyed() || isFinishing()) return;
+                    lookup.dismiss();
+                    choosingGroup = false;
+                    new AlertDialog.Builder(this)
+                        .setMessage("Не удалось загрузить список групп. Проверь интернет.")
+                        .setPositiveButton("Повторить", (dialog, which) -> chooseGroup())
+                        .setNegativeButton("Закрыть", null)
+                        .show();
+                });
+            }
+        }).start();
+    }
+
     private void load() {
+        if (groupId.isEmpty()) {
+            chooseGroup();
+            return;
+        }
         int request = ++generation;
         Calendar monday = (Calendar) date.clone();
         monday.add(Calendar.DAY_OF_YEAR, -((monday.get(Calendar.DAY_OF_WEEK) + 5) % 7));
         String start = format("d MMM", monday.getTime());
         monday.add(Calendar.DAY_OF_YEAR, 6);
         String range = start + " – " + format("d MMM yyyy", monday.getTime());
-        week.setText(range);
+        week.setText(groupName + "  ·  " + range);
         days.removeAllViews();
         scroll.scrollTo(0, 0);
         days.addView(new ProgressBar(this), new LinearLayout.LayoutParams(dp(36), dp(36)));
         String queryDate = format("yyyy.MM.dd", date.getTime());
+        String query = "group_id=" + groupId + "&date=" + queryDate + "&mode=week";
         new Thread(() -> {
             try {
-                JSONArray data = fetch(queryDate);
+                JSONArray data = fetch("getGroupTimetable", query);
                 runOnUiThread(() -> {
-                    if (request == generation && !isDestroyed()) show(data, range);
+                    if (request == generation && !isDestroyed()) show(data);
                 });
             } catch (Exception error) {
                 runOnUiThread(() -> {
@@ -104,8 +174,8 @@ public class MainActivity extends Activity {
         }).start();
     }
 
-    private JSONArray fetch(String queryDate) throws Exception {
-        URL url = new URL(BASE + "/procollege/core_procollege/helpers/rest/getGroupTimetable");
+    private JSONArray fetch(String method, String form) throws Exception {
+        URL url = new URL(BASE + "/procollege/core_procollege/helpers/rest/" + method);
         HttpURLConnection connection = (HttpURLConnection) url.openConnection();
         try {
             connection.setConnectTimeout(10000);
@@ -115,7 +185,7 @@ public class MainActivity extends Activity {
             connection.setDoOutput(true);
             connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
             try (OutputStream body = connection.getOutputStream()) {
-                body.write(("group_id=" + GROUP + "&date=" + queryDate + "&mode=week").getBytes("UTF-8"));
+                body.write(form.getBytes("UTF-8"));
             }
             if (connection.getResponseCode() != 200) throw new IOException("HTTP " + connection.getResponseCode());
             try (Reader reader = new InputStreamReader(connection.getInputStream(), "UTF-8")) {
@@ -130,13 +200,12 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void show(JSONArray data, String range) {
+    private void show(JSONArray data) {
         days.removeAllViews();
         String today = format("yyyy.MM.dd", new Date());
         for (int i = 0; i < data.length(); i++) {
             JSONObject day = data.optJSONObject(i);
             if (day == null) continue;
-            if (i == 0) week.setText(day.optString("gname", "Группа " + GROUP) + "  ·  " + range);
             String dayDate = day.optString("date");
             LinearLayout panel = column();
             panel.setPadding(0, dp(4), 0, dp(12));
@@ -219,4 +288,3 @@ public class MainActivity extends Activity {
         return Math.round(value * getResources().getDisplayMetrics().density);
     }
 }
-
