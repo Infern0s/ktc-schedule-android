@@ -36,6 +36,36 @@ public class MainActivity extends Activity {
     private WebView grades;
     private boolean gradesVisible;
     private ScrollView scroll;
+    private final List<LessonHighlight> lessonHighlights = new ArrayList<>();
+    private final List<TextView> dayHeadings = new ArrayList<>();
+    private String displayedToday;
+    private final Runnable clockUpdate = new Runnable() {
+        @Override public void run() {
+            refreshHighlights();
+            scroll.postDelayed(this, 60_000 - System.currentTimeMillis() % 60_000);
+        }
+    };
+
+    private static final class LessonHighlight {
+        final View card;
+        final GradientDrawable background;
+        final String date;
+        final int start, end;
+        final TextView time;
+        final String label;
+        boolean active;
+
+        LessonHighlight(View card, GradientDrawable background, String date, int start,
+                        int end, TextView time, String label) {
+            this.card = card;
+            this.background = background;
+            this.date = date;
+            this.start = start;
+            this.end = end;
+            this.time = time;
+            this.label = label;
+        }
+    }
     private TextView week;
     private int generation;
 
@@ -135,6 +165,7 @@ public class MainActivity extends Activity {
             grades.loadUrl(GRADES);
         }
         if (grades != null) grades.setVisibility(showGrades ? View.VISIBLE : View.GONE);
+        if (!showGrades) refreshHighlights();
     }
 
     @Override public void onBackPressed() {
@@ -144,6 +175,16 @@ public class MainActivity extends Activity {
         } else {
             super.onBackPressed();
         }
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        clockUpdate.run();
+    }
+
+    @Override protected void onPause() {
+        scroll.removeCallbacks(clockUpdate);
+        super.onPause();
     }
 
     @Override protected void onDestroy() {
@@ -241,6 +282,8 @@ public class MainActivity extends Activity {
         String range = start + " – " + format("d MMM yyyy", monday.getTime());
         week.setText(groupName + "  ·  " + range);
         days.removeAllViews();
+        lessonHighlights.clear();
+        dayHeadings.clear();
         scroll.scrollTo(0, 0);
         days.addView(new ProgressBar(this), new LinearLayout.LayoutParams(dp(36), dp(36)));
         String queryDate = format("yyyy.MM.dd", date.getTime());
@@ -289,6 +332,9 @@ public class MainActivity extends Activity {
     }
 
     private void show(JSONArray data, int slideDirection) {
+        lessonHighlights.clear();
+        dayHeadings.clear();
+        LinearLayout todayPanel = null;
         days.removeAllViews();
         String today = format("yyyy.MM.dd", new Date());
         for (int i = 0; i < data.length(); i++) {
@@ -297,10 +343,14 @@ public class MainActivity extends Activity {
             String dayDate = day.optString("date");
             LinearLayout panel = column();
             panel.setPadding(0, dp(4), 0, dp(12));
-            panel.addView(label(day.optString("dayName") + "  ·  " + dayDate
-                + (today.equals(dayDate) ? "  ·  Сегодня" : ""), 18, accent, true));
+            TextView heading = label(day.optString("dayName") + "  ·  " + dayDate, 18, accent, true);
+            heading.setTag(dayDate);
+            heading.setPadding(dp(10), dp(5), dp(10), dp(5));
+            dayHeadings.add(heading);
+            panel.addView(heading);
+            if (today.equals(dayDate)) todayPanel = panel;
             JSONArray slots = day.optJSONArray("lessons");
-            int count = addLessons(panel, slots);
+            int count = addLessons(panel, slots, dayDate);
             if (count == 0) panel.addView(label("Пар нет", 15, muted, false));
             days.addView(panel);
             panel.setAlpha(0);
@@ -311,9 +361,19 @@ public class MainActivity extends Activity {
                 .setDuration(380).start();
         }
         if (days.getChildCount() == 0) days.addView(label("На этой неделе расписания нет", 18, ink, true));
+        displayedToday = null;
+        refreshHighlights();
+        if (todayPanel != null && !gradesVisible) {
+            View destination = todayPanel;
+            scroll.post(() -> {
+                if (destination.getParent() == days && !gradesVisible) {
+                    scroll.smoothScrollTo(0, destination.getTop() - dp(8));
+                }
+            });
+        }
     }
 
-    private int addLessons(LinearLayout panel, JSONArray slots) {
+    private int addLessons(LinearLayout panel, JSONArray slots, String dayDate) {
         int count = 0;
         for (int i = 0; slots != null && i < slots.length(); i++) {
             JSONArray variants = slots.optJSONArray(i);
@@ -335,12 +395,12 @@ public class MainActivity extends Activity {
                 int weekNumber = item.optInt("week", -1);
                 boolean replacement = !cancelled.isEmpty() && (active.size() == 1
                     || (weekNumber > 0 && weekNumber == item.optInt("study_w")));
-                addCard(panel, item, replacement ? android.text.TextUtils.join(" / ", originalSubjects) : null);
+                addCard(panel, item, dayDate, replacement ? android.text.TextUtils.join(" / ", originalSubjects) : null);
                 count++;
             }
             if (active.isEmpty()) {
                 for (JSONObject item : cancelled) {
-                    addCard(panel, item, null);
+                    addCard(panel, item, dayDate, null);
                     count++;
                 }
             }
@@ -348,7 +408,7 @@ public class MainActivity extends Activity {
         return count;
     }
 
-    private void addCard(LinearLayout panel, JSONObject item, String original) {
+    private void addCard(LinearLayout panel, JSONObject item, String dayDate, String original) {
         LinearLayout card = column();
         card.setPadding(dp(15), dp(12), dp(15), dp(12));
         GradientDrawable background = new GradientDrawable();
@@ -357,7 +417,13 @@ public class MainActivity extends Activity {
         card.setBackground(background);
         String time = item.optString("lesson") + "-я пара  ·  "
             + item.optString("lesson_start") + "–" + item.optString("lesson_end");
-        card.addView(label(time, 13, accent, true));
+        TextView timeLabel = label(time, 13, accent, true);
+        card.addView(timeLabel);
+        if (item.optInt("cancel") != 1) {
+            lessonHighlights.add(new LessonHighlight(card, background, dayDate,
+                minutes(item.optString("lesson_start")), minutes(item.optString("lesson_end")),
+                timeLabel, time));
+        }
         if (original != null) addStatus(card, "Замена", true);
         else if (item.optInt("cancel") == 1) addStatus(card, "Отмена", false);
         card.addView(label(item.optString("discipline"), 17, ink, true));
@@ -373,6 +439,56 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
         params.topMargin = dp(8);
         panel.addView(card, params);
+    }
+
+    private int minutes(String value) {
+        String[] parts = value.split(":");
+        if (parts.length < 2) return -1;
+        try {
+            int hour = Integer.parseInt(parts[0]);
+            int minute = Integer.parseInt(parts[1]);
+            return hour >= 0 && hour < 24 && minute >= 0 && minute < 60 ? hour * 60 + minute : -1;
+        } catch (NumberFormatException error) {
+            return -1;
+        }
+    }
+
+    private void refreshHighlights() {
+        Date now = new Date();
+        String today = format("yyyy.MM.dd", now);
+        if (!today.equals(displayedToday)) {
+            String previous = displayedToday;
+            displayedToday = today;
+            if (previous != null && previous.equals(format("yyyy.MM.dd", date.getTime()))) {
+                date.setTime(now);
+                load();
+                return;
+            }
+            for (TextView heading : dayHeadings) {
+                boolean current = today.equals(heading.getTag());
+                String text = heading.getText().toString().replace("  ·  Сегодня", "");
+                heading.setText(current ? text + "  ·  Сегодня" : text);
+                GradientDrawable pill = new GradientDrawable();
+                pill.setCornerRadius(dp(12));
+                pill.setColor(current ? (dark ? 0xff243856 : 0xffdbe8ff) : Color.TRANSPARENT);
+                heading.setBackground(pill);
+            }
+        }
+        Calendar time = Calendar.getInstance(zone);
+        time.setTime(now);
+        int minute = time.get(Calendar.HOUR_OF_DAY) * 60 + time.get(Calendar.MINUTE);
+        for (LessonHighlight lesson : lessonHighlights) {
+            boolean active = today.equals(lesson.date) && lesson.start >= 0
+                && minute >= lesson.start && minute < lesson.end;
+            if (active == lesson.active) continue;
+            lesson.active = active;
+            lesson.background.setColor(active ? (dark ? 0xff233d52 : 0xffe0f3ed) : surface);
+            lesson.background.setStroke(active ? dp(1) : 0, dark ? 0xff6dbfa6 : 0xff377e6a);
+            lesson.time.setText(active ? lesson.label + "  ·  Идёт сейчас" : lesson.label);
+            float scale = active ? 1.025f : 1f;
+            lesson.card.animate().scaleX(scale).scaleY(scale).setDuration(240)
+                .setInterpolator(ENTER).start();
+        }
     }
 
     private void addStatus(LinearLayout card, String status, boolean replacement) {
