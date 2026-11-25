@@ -317,17 +317,38 @@ public class MainActivity extends Activity {
         int count = 0;
         for (int i = 0; slots != null && i < slots.length(); i++) {
             JSONArray variants = slots.optJSONArray(i);
-            for (int j = 0; variants != null && j < variants.length(); j++) {
+            if (variants == null) continue;
+            List<JSONObject> active = new ArrayList<>();
+            List<JSONObject> cancelled = new ArrayList<>();
+            Set<String> originalSubjects = new LinkedHashSet<>();
+            for (int j = 0; j < variants.length(); j++) {
                 JSONObject item = variants.optJSONObject(j);
                 if (item == null || item.isNull("discipline") || item.optString("discipline").isEmpty()) continue;
-                addCard(panel, item);
+                if (item.optInt("cancel") == 1) {
+                    cancelled.add(item);
+                    originalSubjects.add(item.optString("discipline"));
+                } else {
+                    active.add(item);
+                }
+            }
+            for (JSONObject item : active) {
+                int weekNumber = item.optInt("week", -1);
+                boolean replacement = !cancelled.isEmpty() && (active.size() == 1
+                    || (weekNumber > 0 && weekNumber == item.optInt("study_w")));
+                addCard(panel, item, replacement ? android.text.TextUtils.join(" / ", originalSubjects) : null);
                 count++;
+            }
+            if (active.isEmpty()) {
+                for (JSONObject item : cancelled) {
+                    addCard(panel, item, null);
+                    count++;
+                }
             }
         }
         return count;
     }
 
-    private void addCard(LinearLayout panel, JSONObject item) {
+    private void addCard(LinearLayout panel, JSONObject item, String original) {
         LinearLayout card = column();
         card.setPadding(dp(15), dp(12), dp(15), dp(12));
         GradientDrawable background = new GradientDrawable();
@@ -336,17 +357,38 @@ public class MainActivity extends Activity {
         card.setBackground(background);
         String time = item.optString("lesson") + "-я пара  ·  "
             + item.optString("lesson_start") + "–" + item.optString("lesson_end");
-        String cancellation = item.optString("cancel", "");
-        if (!cancellation.isEmpty() && !cancellation.equals("0") && !cancellation.equals("false")) time += "  ·  Отмена";
         card.addView(label(time, 13, accent, true));
+        if (original != null) addStatus(card, "Замена", true);
+        else if (item.optInt("cancel") == 1) addStatus(card, "Отмена", false);
         card.addView(label(item.optString("discipline"), 17, ink, true));
         String teacher = item.optString("lastname", "");
         String room = item.optString("classroom", "");
         if (!room.isEmpty()) teacher += (teacher.isEmpty() ? "" : "  ·  ") + "Ауд. " + room;
         if (!teacher.isEmpty()) card.addView(label(teacher, 14, muted, false));
+        if (original != null) {
+            TextView previous = label("Было: " + original, 13, muted, false);
+            previous.setPadding(0, dp(7), 0, 0);
+            card.addView(previous);
+        }
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
         params.topMargin = dp(8);
         panel.addView(card, params);
+    }
+
+    private void addStatus(LinearLayout card, String status, boolean replacement) {
+        int foreground = replacement ? (dark ? 0xffffd18a : 0xff704300)
+            : (dark ? 0xffffb3b3 : 0xff972929);
+        int fill = replacement ? (dark ? 0xff49351a : 0xffffeccb)
+            : (dark ? 0xff51292f : 0xffffe3e3);
+        TextView badge = label(status, 12, foreground, true);
+        badge.setPadding(dp(9), dp(3), dp(9), dp(3));
+        GradientDrawable shape = new GradientDrawable();
+        shape.setColor(fill);
+        shape.setCornerRadius(dp(14));
+        badge.setBackground(shape);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-2, -2);
+        params.setMargins(0, dp(6), 0, dp(5));
+        card.addView(badge, params);
     }
 
     private LinearLayout column() {
