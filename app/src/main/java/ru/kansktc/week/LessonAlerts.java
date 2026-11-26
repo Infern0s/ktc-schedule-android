@@ -21,9 +21,16 @@ public final class LessonAlerts extends BroadcastReceiver {
         for (JobInfo current : jobs.getAllPendingJobs()) {
             if (current.getId() == JOB && current.getIntervalMillis() == minutes * 60_000L) return;
         }
-        jobs.schedule(new JobInfo.Builder(JOB, new ComponentName(context, BackgroundSync.class))
-            .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
-            .setPeriodic(minutes * 60_000L).setPersisted(true).build());
+        try {
+            int result = jobs.schedule(new JobInfo.Builder(JOB, new ComponentName(context, BackgroundSync.class))
+                .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
+                .setPeriodic(minutes * 60_000L).setPersisted(true).build());
+            if (result == JobScheduler.RESULT_FAILURE) {
+                android.util.Log.w("LessonAlerts", "Background schedule sync was not accepted");
+            }
+        } catch (SecurityException | IllegalArgumentException error) {
+            android.util.Log.w("LessonAlerts", "Could not schedule background sync", error);
+        }
     }
 
     public static final class BackgroundSync extends JobService {
