@@ -81,6 +81,17 @@ public class MainActivity extends Activity {
     }
     private TextView week;
     private int generation;
+    private boolean foreground;
+    private boolean exactSettingsOpened;
+    private boolean syncInFlight;
+    private TextView screenTitle;
+    private String displayedSchedule;
+    private final Runnable periodicSync = new Runnable() {
+        @Override public void run() {
+            if (foreground && !groupId.isEmpty()) loadSchedule(false, true);
+            queueSync();
+        }
+    };
 
     @Override public void onCreate(Bundle state) {
         int nightMode = getResources().getConfiguration().uiMode & 0x30;
@@ -105,24 +116,17 @@ public class MainActivity extends Activity {
         header.setElevation(dp(5));
         LinearLayout title = new LinearLayout(this);
         title.setGravity(android.view.Gravity.CENTER_VERTICAL);
-        TextView heading = label("Расписание пар", 27, Color.WHITE, true);
-        title.addView(heading, new LinearLayout.LayoutParams(0, -2, 1));
-        Button theme = new Button(this);
-        theme.setAllCaps(false);
-        theme.setText(dark ? "Светлая" : "Тёмная");
-        theme.setContentDescription(dark ? "Включить светлую тему" : "Включить тёмную тему");
-        styleButton(theme);
-        theme.setOnClickListener(v -> {
-            getPreferences(MODE_PRIVATE).edit().putBoolean("darkTheme", !dark).apply();
-            recreate();
-        });
-        title.addView(theme);
+        screenTitle = label("Расписание пар", 27, Color.WHITE, true);
+        title.addView(screenTitle, new LinearLayout.LayoutParams(0, -2, 1));
+        Button menu = new Button(this);
+        menu.setText("☰");
+        menu.setTextSize(21);
+        menu.setContentDescription("Открыть меню");
+        styleButton(menu);
+        menu.setOnClickListener(v -> openMenu());
+        title.addView(menu, new LinearLayout.LayoutParams(dp(48), dp(46)));
         header.addView(title);
         week = label("", 15, 0xffc5d5f2, false);
-        LinearLayout tabs = new LinearLayout(this);
-        button(tabs, "Расписание", "Расписание", () -> showTab(false));
-        button(tabs, "Оценки", "Оценки и вход в ПроКолледж", () -> showTab(true));
-        header.addView(tabs);
         scheduleControls = column();
         header.addView(scheduleControls);
         scheduleControls.addView(week);
@@ -139,10 +143,6 @@ public class MainActivity extends Activity {
         scheduleControls.addView(nav);
         nav.setVisibility(dayOnly ? View.GONE : View.VISIBLE);
         weekNav = nav;
-        LinearLayout actions = new LinearLayout(this);
-        button(actions, "Группа", "Выбрать группу", this::chooseGroup);
-        button(actions, "Обновить", "Обновить расписание", this::load);
-        scheduleControls.addView(actions);
         root.addView(header);
         scroll = new ScrollView(this);
         scroll.setClipToPadding(false);
@@ -155,6 +155,9 @@ public class MainActivity extends Activity {
         groupId = getPreferences(MODE_PRIVATE).getString("groupId", "");
         groupName = getPreferences(MODE_PRIVATE).getString("groupName", "");
         load();
+        LessonAlerts.scheduleSync(this);
+        LessonAlerts.refreshReminders(this);
+        if (!groupId.isEmpty()) requestInitialNotifications();
         if (state != null && state.getBoolean("gradesVisible")) showTab(true);
     }
 
@@ -164,8 +167,151 @@ public class MainActivity extends Activity {
         super.onSaveInstanceState(state);
     }
 
+    private void openMenu() {
+        android.app.Dialog menu = new android.app.Dialog(this);
+        LinearLayout body = column();
+        body.setPadding(dp(16), dp(10), dp(16), dp(12));
+        body.setBackground(glass(0xff344f75, 0xff192940));
+        String[] labels = {"Расписание", "Оценки", "Группа", "Обновить",
+            dark ? "Светлая тема" : "Тёмная тема", "Настройки"};
+        Runnable[] actions = {() -> showTab(false), () -> showTab(true), () -> {
+            showTab(false);
+            chooseGroup();
+        }, () -> {
+            if (gradesVisible) loadJournal(journalUrl);
+            else loadSchedule(true, true);
+        }, () -> {
+            getPreferences(MODE_PRIVATE).edit().putBoolean("darkTheme", !dark).apply();
+            recreate();
+        }, this::showSettings};
+        for (int i = 0; i < labels.length; i++) {
+            Button item = new Button(this);
+            item.setAllCaps(false);
+            item.setText(labels[i]);
+            styleButton(item);
+            item.setGravity(Gravity.CENTER_VERTICAL | Gravity.START);
+            item.setPadding(dp(16), 0, dp(16), 0);
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
+            params.topMargin = dp(6);
+            body.addView(item, params);
+            Runnable action = actions[i];
+            item.setOnClickListener(view -> {
+                menu.dismiss();
+                action.run();
+            });
+        }
+        menu.setContentView(body);
+        android.view.Window window = menu.getWindow();
+        window.setBackgroundDrawableResource(android.R.color.transparent);
+        window.setGravity(Gravity.TOP | Gravity.END);
+        android.view.WindowManager.LayoutParams position = window.getAttributes();
+        position.x = dp(12);
+        position.y = dp(12);
+        window.setAttributes(position);
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND);
+        window.setDimAmount(0.35f);
+        if (android.os.Build.VERSION.SDK_INT >= 31) {
+            root.setRenderEffect(android.graphics.RenderEffect.createBlurEffect(dp(12), dp(12),
+                android.graphics.Shader.TileMode.CLAMP));
+            menu.setOnDismissListener(dialog -> root.setRenderEffect(null));
+        }
+        menu.show();
+        window.setLayout(dp(235), -2);
+    }
+
+    private void showSettings() {
+        android.content.SharedPreferences settings = getPreferences(MODE_PRIVATE);
+        LinearLayout options = column();
+        options.setPadding(dp(20), dp(8), dp(20), dp(8));
+        String[] keys = {"alertBefore", "alertCancelled", "alertAdded", "alertChanged"};
+        String[] names = {"Перед началом пары", "Об отмене", "О новой паре", "О замене и изменениях"};
+        Switch[] toggles = new Switch[keys.length];
+        for (int i = 0; i < keys.length; i++) {
+            Switch toggle = new Switch(this);
+            toggle.setText(names[i]);
+            toggle.setMinHeight(dp(44));
+            toggle.setChecked(settings.getBoolean(keys[i], true));
+            options.addView(toggle);
+            toggles[i] = toggle;
+        }
+        int[] leadValues = {1, 3, 5, 10, 15, 20, 30, 60};
+        int[] syncValues = {5, 10, 15, 30, 60};
+        Spinner lead = minuteOption(options, "Напоминать до начала", leadValues,
+            settings.getInt("leadMinutes", 5));
+        Spinner sync = minuteOption(options, "Обновлять расписание", syncValues,
+            settings.getInt("syncMinutes", 5));
+        options.addView(label("В фоне Android проверяет расписание каждые 15 минут или реже.",
+            13, muted, false));
+        if (android.os.Build.VERSION.SDK_INT >= 31
+                && !getSystemService(android.app.AlarmManager.class).canScheduleExactAlarms()) {
+            Button exact = new Button(this);
+            exact.setText("Разрешить точные напоминания");
+            exact.setAllCaps(false);
+            styleButton(exact);
+            exact.setOnClickListener(v -> {
+                exactSettingsOpened = true;
+                startActivity(new android.content.Intent(android.provider.Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM,
+                    Uri.parse("package:" + getPackageName())));
+            });
+            options.addView(exact);
+        }
+        ScrollView content = new ScrollView(this);
+        content.addView(options);
+        new AlertDialog.Builder(this).setTitle("Уведомления и обновление")
+            .setView(content).setNegativeButton("Отмена", null)
+            .setPositiveButton("Сохранить", (dialog, which) -> {
+                android.content.SharedPreferences.Editor edit = settings.edit();
+                boolean anyEnabled = false;
+                for (int i = 0; i < keys.length; i++) {
+                    edit.putBoolean(keys[i], toggles[i].isChecked());
+                    anyEnabled |= toggles[i].isChecked();
+                }
+                edit.putInt("leadMinutes", leadValues[lead.getSelectedItemPosition()])
+                    .putInt("syncMinutes", syncValues[sync.getSelectedItemPosition()]).apply();
+                LessonAlerts.scheduleSync(this);
+                LessonAlerts.refreshReminders(this);
+                queueSync();
+                if (anyEnabled) requestNotificationPermission();
+            }).show();
+    }
+
+    private Spinner minuteOption(LinearLayout options, String title, int[] values, int current) {
+        TextView caption = label(title, 15, ink, true);
+        caption.setPadding(0, dp(10), 0, 0);
+        options.addView(caption);
+        Spinner spinner = new Spinner(this);
+        String[] labels = new String[values.length];
+        int selection = 0;
+        for (int i = 0; i < values.length; i++) {
+            labels[i] = values[i] + " мин";
+            if (values[i] == current) selection = i;
+        }
+        ArrayAdapter<String> adapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, labels);
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        spinner.setAdapter(adapter);
+        spinner.setSelection(selection);
+        options.addView(spinner);
+        return spinner;
+    }
+
+    private void requestInitialNotifications() {
+        android.content.SharedPreferences prefs = getPreferences(MODE_PRIVATE);
+        if (prefs.getBoolean("notificationPrompted", false)) return;
+        prefs.edit().putBoolean("notificationPrompted", true).apply();
+        requestNotificationPermission();
+    }
+
+    private void requestNotificationPermission() {
+        if (android.os.Build.VERSION.SDK_INT >= 33
+                && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
+                    != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, 1041);
+        }
+    }
+
     private void showTab(boolean showGrades) {
         gradesVisible = showGrades;
+        screenTitle.setText(showGrades ? "Оценки" : "Расписание пар");
         scheduleControls.setVisibility(showGrades ? View.GONE : View.VISIBLE);
         scroll.setVisibility(showGrades ? View.GONE : View.VISIBLE);
         if (showGrades && grades == null) createGradeViews();
@@ -384,11 +530,20 @@ public class MainActivity extends Activity {
 
     @Override protected void onResume() {
         super.onResume();
+        foreground = true;
+        if (exactSettingsOpened) {
+            exactSettingsOpened = false;
+            LessonAlerts.refreshReminders(this);
+        }
         clockUpdate.run();
+        if (!groupId.isEmpty() && !syncInFlight) loadSchedule(false, true);
+        queueSync();
     }
 
     @Override protected void onPause() {
+        foreground = false;
         scroll.removeCallbacks(clockUpdate);
+        scroll.removeCallbacks(periodicSync);
         super.onPause();
     }
 
@@ -434,7 +589,7 @@ public class MainActivity extends Activity {
             .show();
         new Thread(() -> {
             try {
-                JSONArray groups = fetch("getGroups", "");
+                JSONArray groups = ScheduleStore.request("getGroups", "");
                 List<JSONObject> entries = new ArrayList<>();
                 for (int i = 0; i < groups.length(); i++) {
                     JSONObject group = groups.optJSONObject(i);
@@ -458,7 +613,9 @@ public class MainActivity extends Activity {
                                 .putString("groupId", groupId)
                                 .putString("groupName", groupName)
                                 .apply();
+                            LessonAlerts.refreshReminders(this);
                             load();
+                            requestInitialNotifications();
                         })
                         .setCancelable(true)
                         .create();
@@ -481,10 +638,15 @@ public class MainActivity extends Activity {
     }
 
     private void load() {
+        loadSchedule(false, false);
+    }
+
+    private void loadSchedule(boolean force, boolean quiet) {
+        if (quiet && syncInFlight) return;
         if (groupId.isEmpty()) {
             week.setText("Группа не выбрана");
             days.removeAllViews();
-            days.addView(label("Нажми «Группа», чтобы открыть расписание.", 16, muted, false));
+            days.addView(label("Выбери «Группа» в меню ☰, чтобы открыть расписание.", 16, muted, false));
             return;
         }
         if (dayOnly) date.setTimeInMillis(System.currentTimeMillis());
@@ -497,57 +659,65 @@ public class MainActivity extends Activity {
         monday.add(Calendar.DAY_OF_YEAR, 6);
         String range = start + " – " + format("d MMM yyyy", monday.getTime());
         week.setText(groupName + "  ·  " + (dayOnly ? format("d MMMM", date.getTime()) : range));
-        days.removeAllViews();
-        lessonHighlights.clear();
-        dayHeadings.clear();
-        scroll.scrollTo(0, 0);
-        days.addView(new ProgressBar(this), new LinearLayout.LayoutParams(dp(36), dp(36)));
-        String queryDate = format("yyyy.MM.dd", date.getTime());
-        String query = "group_id=" + groupId + "&date=" + queryDate + "&mode=week";
+        String group = groupId;
+        Date requested = date.getTime();
+        String key = ScheduleStore.weekKey(group, requested);
+        JSONArray cached = ScheduleStore.cached(this, key);
+        if (!quiet) {
+            displayedSchedule = null;
+            days.removeAllViews();
+            lessonHighlights.clear();
+            dayHeadings.clear();
+            scroll.scrollTo(0, 0);
+            if (cached != null) {
+                displayedSchedule = cached.toString();
+                show(cached, slideDirection, true);
+            } else {
+                days.addView(new ProgressBar(this), new LinearLayout.LayoutParams(dp(36), dp(36)));
+            }
+        }
+        syncInFlight = true;
         new Thread(() -> {
+            JSONArray result = null;
             try {
-                JSONArray data = fetch("getGroupTimetable", query);
-                runOnUiThread(() -> {
-                    if (request == generation && !isDestroyed()) show(data, slideDirection);
-                });
-            } catch (Exception error) {
-                runOnUiThread(() -> {
-                    if (request != generation || isDestroyed()) return;
+                result = ScheduleStore.sync(getApplicationContext(), group, requested, force);
+            } catch (Exception ignored) {
+                // A failed request leaves the last successful schedule on screen.
+            }
+            Date now = new Date();
+            if (!key.equals(ScheduleStore.weekKey(group, now))) {
+                try {
+                    ScheduleStore.sync(getApplicationContext(), group, now, false);
+                } catch (Exception ignored) { }
+            }
+            JSONArray data = result;
+            runOnUiThread(() -> {
+                if (request != generation || isDestroyed()) return;
+                syncInFlight = false;
+                if (data != null) {
+                    String snapshot = data.toString();
+                    if (!snapshot.equals(displayedSchedule)) {
+                        boolean firstDraw = displayedSchedule == null;
+                        displayedSchedule = snapshot;
+                        show(data, slideDirection, firstDraw);
+                    }
+                } else if (cached == null && displayedSchedule == null) {
                     days.removeAllViews();
                     days.addView(label("Не удалось загрузить расписание", 18, ink, true));
-                    days.addView(label("Проверь интернет и нажми «Обновить».", 15, muted, false));
-                });
-            }
+                    days.addView(label("Проверь интернет и выбери «Обновить» в меню.", 15, muted, false));
+                }
+            });
         }).start();
     }
 
-    private JSONArray fetch(String method, String form) throws Exception {
-        URL url = new URL(BASE + "/procollege/core_procollege/helpers/rest/" + method);
-        HttpURLConnection connection = (HttpURLConnection) url.openConnection();
-        try {
-            connection.setConnectTimeout(10000);
-            connection.setReadTimeout(10000);
-            connection.setInstanceFollowRedirects(false);
-            connection.setRequestMethod("POST");
-            connection.setDoOutput(true);
-            connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
-            try (OutputStream body = connection.getOutputStream()) {
-                body.write(form.getBytes("UTF-8"));
-            }
-            if (connection.getResponseCode() != 200) throw new IOException("HTTP " + connection.getResponseCode());
-            try (Reader reader = new InputStreamReader(connection.getInputStream(), "UTF-8")) {
-                StringBuilder json = new StringBuilder();
-                char[] buffer = new char[4096];
-                int count;
-                while ((count = reader.read(buffer)) != -1) json.append(buffer, 0, count);
-                return new JSONArray(json.toString());
-            }
-        } finally {
-            connection.disconnect();
-        }
+    private void queueSync() {
+        scroll.removeCallbacks(periodicSync);
+        if (foreground) scroll.postDelayed(periodicSync,
+            getPreferences(MODE_PRIVATE).getInt("syncMinutes", 5) * 60_000L);
     }
 
-    private void show(JSONArray data, int slideDirection) {
+    private void show(JSONArray data, int slideDirection, boolean navigate) {
+        int oldScroll = scroll.getScrollY();
         lessonHighlights.clear();
         dayHeadings.clear();
         LinearLayout todayPanel = null;
@@ -571,17 +741,20 @@ public class MainActivity extends Activity {
             int count = addLessons(panel, slots, dayDate);
             if (count == 0) panel.addView(label("Пар нет", 15, muted, false));
             days.addView(panel);
-            panel.setAlpha(0);
-            panel.setTranslationY(dp(10));
-            panel.setTranslationX(dp(20) * slideDirection);
-            panel.animate().alpha(1).translationX(0).translationY(0)
-                .setInterpolator(ENTER).setStartDelay(Math.min(i * 28L, 112L))
-                .setDuration(380).start();
+            if (navigate) {
+                panel.setAlpha(0);
+                panel.setTranslationY(dp(10));
+                panel.setTranslationX(dp(20) * slideDirection);
+                panel.animate().alpha(1).translationX(0).translationY(0)
+                    .setInterpolator(ENTER).setStartDelay(Math.min(i * 28L, 112L))
+                    .setDuration(380).start();
+            }
         }
         if (days.getChildCount() == 0) days.addView(label(dayOnly ? "Сегодня пар нет" : "На этой неделе расписания нет", 18, ink, true));
         displayedToday = null;
         refreshHighlights();
-        if (todayPanel != null && !gradesVisible) {
+        if (!navigate) scroll.post(() -> scroll.scrollTo(0, oldScroll));
+        if (navigate && todayPanel != null && !gradesVisible) {
             View destination = todayPanel;
             scroll.post(() -> {
                 if (destination.getParent() == days && !gradesVisible) {
