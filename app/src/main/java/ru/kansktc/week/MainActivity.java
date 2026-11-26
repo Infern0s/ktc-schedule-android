@@ -1,7 +1,6 @@
 package ru.kansktc.week;
 
 import android.app.Activity;
-import android.app.AlertDialog;
 import android.webkit.CookieManager;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebView;
@@ -27,7 +26,12 @@ public class MainActivity extends Activity {
     private static final String BASE = "https://pro.kansk-tc.ru";
     private String groupId;
     private String groupName;
-    private boolean choosingGroup;
+    private View auxiliaryPage;
+    private Button backButton;
+    private boolean groupsLoading;
+    private List<JSONObject> groupCatalog;
+    private LinearLayout groupResults;
+    private EditText groupSearch;
     private static final PathInterpolator ENTER = new PathInterpolator(0.2f, 0f, 0f, 1f);
     private boolean dark;
     private int ink, muted, accent, surface;
@@ -116,6 +120,16 @@ public class MainActivity extends Activity {
         header.setElevation(dp(5));
         LinearLayout title = new LinearLayout(this);
         title.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        backButton = new Button(this);
+        backButton.setText("‹");
+        backButton.setTextSize(27);
+        backButton.setContentDescription("Вернуться к расписанию");
+        styleButton(backButton);
+        backButton.setOnClickListener(v -> showTab(false));
+        LinearLayout.LayoutParams backParams = new LinearLayout.LayoutParams(dp(42), dp(46));
+        backParams.rightMargin = dp(12);
+        title.addView(backButton, backParams);
+        backButton.setVisibility(View.GONE);
         screenTitle = label("Расписание пар", 27, Color.WHITE, true);
         title.addView(screenTitle, new LinearLayout.LayoutParams(0, -2, 1));
         Button menu = new Button(this);
@@ -168,16 +182,43 @@ public class MainActivity extends Activity {
     }
 
     private void openMenu() {
-        android.app.Dialog menu = new android.app.Dialog(this);
         LinearLayout body = column();
+        class AnimatedMenu extends android.app.Dialog {
+            private boolean closing;
+
+            AnimatedMenu() {
+                super(MainActivity.this);
+            }
+
+            @Override public void cancel() {
+                close(null);
+            }
+
+            void close(Runnable action) {
+                if (closing) return;
+                closing = true;
+                for (int i = 0; i < body.getChildCount(); i++) {
+                    View item = body.getChildAt(i);
+                    item.setEnabled(false);
+                    item.animate().cancel();
+                }
+                body.animate().cancel();
+                body.animate().alpha(0f).scaleX(0.96f).scaleY(0.88f).translationY(-dp(6))
+                    .setStartDelay(0).setDuration(170)
+                    .setInterpolator(new android.view.animation.AccelerateInterpolator())
+                    .withEndAction(() -> {
+                        dismiss();
+                        if (action != null && !isFinishing() && !isDestroyed()) action.run();
+                    }).start();
+            }
+        }
+        AnimatedMenu menu = new AnimatedMenu();
         body.setPadding(dp(16), dp(10), dp(16), dp(12));
         body.setBackground(glass(0xff344f75, 0xff192940));
         String[] labels = {"Расписание", "Оценки", "Группа", "Обновить",
             dark ? "Светлая тема" : "Тёмная тема", "Настройки"};
-        Runnable[] actions = {() -> showTab(false), () -> showTab(true), () -> {
-            showTab(false);
-            chooseGroup();
-        }, () -> {
+        Runnable[] actions = {() -> showTab(false), () -> showTab(true), this::chooseGroup, () -> {
+            if (auxiliaryPage != null) showTab(false);
             if (gradesVisible) loadJournal(journalUrl);
             else loadSchedule(true, true);
         }, () -> {
@@ -195,14 +236,23 @@ public class MainActivity extends Activity {
             params.topMargin = dp(6);
             body.addView(item, params);
             Runnable action = actions[i];
-            item.setOnClickListener(view -> {
-                menu.dismiss();
-                action.run();
-            });
+            item.setOnClickListener(view -> menu.close(action));
+        }
+        body.setAlpha(0f);
+        body.setScaleX(0.96f);
+        body.setScaleY(0.78f);
+        body.setTranslationY(-dp(8));
+        for (int i = 0; i < body.getChildCount(); i++) {
+            View item = body.getChildAt(i);
+            item.setAlpha(0f);
+            item.setTranslationY(-dp(8));
+            item.setScaleY(0.91f);
         }
         menu.setContentView(body);
+        menu.setCanceledOnTouchOutside(true);
         android.view.Window window = menu.getWindow();
         window.setBackgroundDrawableResource(android.R.color.transparent);
+        window.setWindowAnimations(0);
         window.setGravity(Gravity.TOP | Gravity.END);
         android.view.WindowManager.LayoutParams position = window.getAttributes();
         position.x = dp(12);
@@ -217,81 +267,124 @@ public class MainActivity extends Activity {
         }
         menu.show();
         window.setLayout(dp(235), -2);
+        body.post(() -> {
+            if (!menu.isShowing() || menu.closing) return;
+            body.setPivotX(body.getWidth());
+            body.setPivotY(0);
+            body.animate().alpha(1f).scaleX(1f).scaleY(1f).translationY(0)
+                .setDuration(290).setInterpolator(ENTER).start();
+            for (int i = 0; i < body.getChildCount(); i++) {
+                View item = body.getChildAt(i);
+                item.animate().alpha(1f).translationY(0).scaleY(1f)
+                    .setStartDelay(30 + i * 30L).setDuration(230).setInterpolator(ENTER).start();
+            }
+        });
     }
 
     private void showSettings() {
         android.content.SharedPreferences settings = getPreferences(MODE_PRIVATE);
+        LinearLayout page = column();
+        page.setPadding(dp(16), dp(12), dp(16), dp(8));
+        ScrollView content = new ScrollView(this);
         LinearLayout options = column();
-        options.setPadding(dp(20), dp(8), dp(20), dp(8));
+        content.addView(options);
+        page.addView(content, new LinearLayout.LayoutParams(-1, 0, 1));
+        showAuxiliary("Настройки", page);
+
+        LinearLayout alerts = settingsPanel(options, "Уведомления");
         String[] keys = {"alertBefore", "alertCancelled", "alertAdded", "alertChanged"};
         String[] names = {"Перед началом пары", "Об отмене", "О новой паре", "О замене и изменениях"};
         Switch[] toggles = new Switch[keys.length];
+        ColorStateList thumb = new ColorStateList(new int[][]{
+            {android.R.attr.state_checked}, {}}, new int[]{accent, muted});
+        ColorStateList track = new ColorStateList(new int[][]{
+            {android.R.attr.state_checked}, {}}, new int[]{0xff446798, 0xff687485});
         for (int i = 0; i < keys.length; i++) {
             Switch toggle = new Switch(this);
             toggle.setText(names[i]);
-            toggle.setMinHeight(dp(44));
+            toggle.setTextSize(15);
+            toggle.setTextColor(ink);
+            toggle.setThumbTintList(thumb);
+            toggle.setTrackTintList(track);
+            toggle.setMinHeight(dp(46));
             toggle.setChecked(settings.getBoolean(keys[i], true));
-            options.addView(toggle);
+            alerts.addView(toggle);
             toggles[i] = toggle;
         }
-        int[] leadValues = {1, 3, 5, 10, 15, 20, 30, 60};
-        int[] syncValues = {5, 10, 15, 30, 60};
-        Spinner lead = minuteOption(options, "Напоминать до начала", leadValues,
-            settings.getInt("leadMinutes", 5));
-        Spinner sync = minuteOption(options, "Обновлять расписание", syncValues,
-            settings.getInt("syncMinutes", 5));
-        options.addView(label("В фоне Android проверяет расписание каждые 15 минут или реже.",
-            13, muted, false));
+        int[] lead = {settings.getInt("leadMinutes", 5)};
+        minuteOptions(alerts, "Напоминать до начала", new int[]{1, 3, 5, 10, 15, 20, 30, 60}, lead);
+
+        LinearLayout updating = settingsPanel(options, "Обновление расписания");
+        int[] sync = {settings.getInt("syncMinutes", 5)};
+        minuteOptions(updating, "Интервал проверки", new int[]{5, 10, 15, 30, 60}, sync);
+        TextView hint = label("В фоне Android проверяет расписание каждые 15 минут или реже.", 13, muted, false);
+        hint.setPadding(0, dp(5), 0, 0);
+        updating.addView(hint);
+
         if (android.os.Build.VERSION.SDK_INT >= 31
                 && !getSystemService(android.app.AlarmManager.class).canScheduleExactAlarms()) {
-            Button exact = new Button(this);
-            exact.setText("Разрешить точные напоминания");
-            exact.setAllCaps(false);
-            styleButton(exact);
-            exact.setOnClickListener(v -> {
+            LinearLayout exact = new LinearLayout(this);
+            button(exact, "Разрешить точные напоминания", "Разрешить точные напоминания", () -> {
                 exactSettingsOpened = true;
                 startActivity(new android.content.Intent(android.provider.Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM,
                     Uri.parse("package:" + getPackageName())));
             });
             options.addView(exact);
         }
-        ScrollView content = new ScrollView(this);
-        content.addView(options);
-        new AlertDialog.Builder(this).setTitle("Уведомления и обновление")
-            .setView(content).setNegativeButton("Отмена", null)
-            .setPositiveButton("Сохранить", (dialog, which) -> {
-                android.content.SharedPreferences.Editor edit = settings.edit();
-                boolean anyEnabled = false;
-                for (int i = 0; i < keys.length; i++) {
-                    edit.putBoolean(keys[i], toggles[i].isChecked());
-                    anyEnabled |= toggles[i].isChecked();
-                }
-                edit.putInt("leadMinutes", leadValues[lead.getSelectedItemPosition()])
-                    .putInt("syncMinutes", syncValues[sync.getSelectedItemPosition()]).apply();
-                LessonAlerts.scheduleSync(this);
-                LessonAlerts.refreshReminders(this);
-                queueSync();
-                if (anyEnabled) requestNotificationPermission();
-            }).show();
+
+        LinearLayout actions = new LinearLayout(this);
+        button(actions, "Отмена", "Вернуться без сохранения", () -> showTab(false));
+        Button save = button(actions, "Сохранить", "Сохранить настройки", () -> {
+            android.content.SharedPreferences.Editor edit = settings.edit();
+            boolean anyEnabled = false;
+            for (int i = 0; i < keys.length; i++) {
+                edit.putBoolean(keys[i], toggles[i].isChecked());
+                anyEnabled |= toggles[i].isChecked();
+            }
+            edit.putInt("leadMinutes", lead[0]).putInt("syncMinutes", sync[0]).apply();
+            LessonAlerts.scheduleSync(this);
+            LessonAlerts.refreshReminders(this);
+            queueSync();
+            showTab(false);
+            if (anyEnabled) requestNotificationPermission();
+        });
+        save.setSelected(true);
+        page.addView(actions);
     }
 
-    private Spinner minuteOption(LinearLayout options, String title, int[] values, int current) {
-        TextView caption = label(title, 15, ink, true);
-        caption.setPadding(0, dp(10), 0, 0);
-        options.addView(caption);
-        Spinner spinner = new Spinner(this);
-        String[] labels = new String[values.length];
-        int selection = 0;
+    private LinearLayout settingsPanel(LinearLayout parent, String title) {
+        LinearLayout section = column();
+        section.setBackground(panelShape(false));
+        section.setPadding(dp(14), dp(14), dp(14), dp(12));
+        section.addView(label(title, 19, ink, true));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
+        params.bottomMargin = dp(12);
+        parent.addView(section, params);
+        return section;
+    }
+
+    private void minuteOptions(LinearLayout section, String title, int[] values, int[] selected) {
+        TextView caption = label(title, 14, muted, true);
+        caption.setPadding(0, dp(9), 0, 0);
+        section.addView(caption);
+        List<Button> choices = new ArrayList<>();
+        LinearLayout row = null;
         for (int i = 0; i < values.length; i++) {
-            labels[i] = values[i] + " мин";
-            if (values[i] == current) selection = i;
+            if (i % 4 == 0) {
+                row = new LinearLayout(this);
+                section.addView(row);
+            }
+            int minutes = values[i];
+            Button choice = button(row, minutes + " мин", title + " " + minutes + " минут", () -> {
+                selected[0] = minutes;
+                for (int index = 0; index < choices.size(); index++) {
+                    choices.get(index).setSelected(values[index] == minutes);
+                }
+            });
+            choice.setTextSize(12);
+            choice.setSelected(selected[0] == minutes);
+            choices.add(choice);
         }
-        ArrayAdapter<String> adapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, labels);
-        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        spinner.setAdapter(adapter);
-        spinner.setSelection(selection);
-        options.addView(spinner);
-        return spinner;
     }
 
     private void requestInitialNotifications() {
@@ -310,6 +403,7 @@ public class MainActivity extends Activity {
     }
 
     private void showTab(boolean showGrades) {
+        closeAuxiliary();
         gradesVisible = showGrades;
         screenTitle.setText(showGrades ? "Оценки" : "Расписание пар");
         scheduleControls.setVisibility(showGrades ? View.GONE : View.VISIBLE);
@@ -377,8 +471,8 @@ public class MainActivity extends Activity {
 
     private void setWebVisible(boolean visible) {
         webVisible = visible;
-        grades.setVisibility(gradesVisible && visible ? View.VISIBLE : View.GONE);
-        gradePanel.setVisibility(gradesVisible && !visible ? View.VISIBLE : View.GONE);
+        grades.setVisibility(gradesVisible && auxiliaryPage == null && visible ? View.VISIBLE : View.GONE);
+        gradePanel.setVisibility(gradesVisible && auxiliaryPage == null && !visible ? View.VISIBLE : View.GONE);
     }
 
     private void loadJournal(String url) {
@@ -522,7 +616,8 @@ public class MainActivity extends Activity {
     }
 
     @Override public void onBackPressed() {
-        if (gradesVisible && webVisible) loadJournal(journalUrl);
+        if (auxiliaryPage != null) showTab(false);
+        else if (gradesVisible && webVisible) loadJournal(journalUrl);
         else if (gradesVisible && !journalUrl.equals(GRADES)) loadJournal(GRADES);
         else if (gradesVisible) showTab(false);
         else super.onBackPressed();
@@ -577,64 +672,146 @@ public class MainActivity extends Activity {
         return format.format(value);
     }
 
+    private void showAuxiliary(String title, View page) {
+        closeAuxiliary();
+        gradesVisible = false;
+        auxiliaryPage = page;
+        screenTitle.setText(title);
+        backButton.setVisibility(View.VISIBLE);
+        scheduleControls.setVisibility(View.GONE);
+        scroll.setVisibility(View.GONE);
+        if (gradePanel != null) gradePanel.setVisibility(View.GONE);
+        if (grades != null) grades.setVisibility(View.GONE);
+        root.addView(page, new LinearLayout.LayoutParams(-1, 0, 1));
+        page.setAlpha(0);
+        page.setTranslationY(dp(8));
+        page.animate().alpha(1).translationY(0).setInterpolator(ENTER).setDuration(220).start();
+    }
+
+    private void closeAuxiliary() {
+        if (auxiliaryPage == null) return;
+        if (groupSearch != null) {
+            getSystemService(android.view.inputmethod.InputMethodManager.class)
+                .hideSoftInputFromWindow(groupSearch.getWindowToken(), 0);
+            groupSearch = null;
+            groupResults = null;
+        }
+        root.removeView(auxiliaryPage);
+        auxiliaryPage = null;
+        backButton.setVisibility(View.GONE);
+    }
+
     private void chooseGroup() {
-        if (choosingGroup) return;
-        choosingGroup = true;
-        if (groupId.isEmpty()) week.setText("Выбери свою группу");
-        ProgressBar loading = new ProgressBar(this);
-        AlertDialog lookup = new AlertDialog.Builder(this)
-            .setTitle("Загружаю группы")
-            .setView(loading)
-            .setCancelable(false)
-            .show();
+        LinearLayout page = column();
+        page.setPadding(dp(16), dp(16), dp(16), 0);
+        page.setFocusableInTouchMode(true);
+        showAuxiliary("Группы", page);
+        groupSearch = new EditText(this);
+        groupSearch.setSingleLine();
+        groupSearch.setTextColor(ink);
+        groupSearch.setHintTextColor(muted);
+        groupSearch.setHint("Поиск группы");
+        groupSearch.setContentDescription("Поиск группы");
+        groupSearch.setPadding(dp(14), dp(10), dp(14), dp(10));
+        groupSearch.setBackground(panelShape(false));
+        page.addView(groupSearch, new LinearLayout.LayoutParams(-1, -2));
+        ScrollView list = new ScrollView(this);
+        groupResults = column();
+        groupResults.setPadding(0, dp(10), 0, dp(18));
+        list.addView(groupResults);
+        page.addView(list, new LinearLayout.LayoutParams(-1, 0, 1));
+        page.requestFocus();
+        groupSearch.addTextChangedListener(new android.text.TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence text, int start, int count, int after) { }
+            @Override public void onTextChanged(CharSequence text, int start, int before, int count) {
+                if (groupCatalog != null && groupResults != null) renderGroups(text.toString());
+            }
+            @Override public void afterTextChanged(android.text.Editable text) { }
+        });
+        if (groupCatalog != null) renderGroups("");
+        else loadGroups();
+    }
+
+    private void loadGroups() {
+        if (groupResults == null) return;
+        groupResults.removeAllViews();
+        groupResults.addView(label("Загрузка групп…", 15, muted, false));
+        if (groupsLoading) return;
+        groupsLoading = true;
         new Thread(() -> {
+            List<JSONObject> entries = new ArrayList<>();
             try {
-                JSONArray groups = ScheduleStore.request("getGroups", "");
-                List<JSONObject> entries = new ArrayList<>();
-                for (int i = 0; i < groups.length(); i++) {
-                    JSONObject group = groups.optJSONObject(i);
+                JSONArray result = ScheduleStore.request("getGroups", "");
+                for (int i = 0; i < result.length(); i++) {
+                    JSONObject group = result.optJSONObject(i);
                     if (group != null && group.optString("id").matches("[0-9]+")
                             && !group.optString("name").isEmpty()) entries.add(group);
                 }
-                if (entries.isEmpty()) throw new IOException("Group list is empty");
-                Collections.sort(entries, (first, second) -> first.optString("name").compareTo(second.optString("name")));
-                CharSequence[] names = new CharSequence[entries.size()];
-                for (int i = 0; i < entries.size(); i++) names[i] = entries.get(i).optString("name");
-                runOnUiThread(() -> {
-                    if (isDestroyed() || isFinishing()) return;
-                    lookup.dismiss();
-                    AlertDialog picker = new AlertDialog.Builder(this)
-                        .setTitle("Выбери группу")
-                        .setItems(names, (dialog, position) -> {
-                            JSONObject group = entries.get(position);
-                            groupId = group.optString("id");
-                            groupName = group.optString("name");
-                            getPreferences(MODE_PRIVATE).edit()
-                                .putString("groupId", groupId)
-                                .putString("groupName", groupName)
-                                .apply();
-                            LessonAlerts.refreshReminders(this);
-                            load();
-                            requestInitialNotifications();
-                        })
-                        .setCancelable(true)
-                        .create();
-                    picker.setOnDismissListener(dialog -> choosingGroup = false);
-                    picker.show();
-                });
-            } catch (Exception error) {
-                runOnUiThread(() -> {
-                    if (isDestroyed() || isFinishing()) return;
-                    lookup.dismiss();
-                    choosingGroup = false;
-                    new AlertDialog.Builder(this)
-                        .setMessage("Не удалось загрузить список групп. Проверь интернет.")
-                        .setPositiveButton("Повторить", (dialog, which) -> chooseGroup())
-                        .setNegativeButton("Закрыть", null)
-                        .show();
-                });
+                Collections.sort(entries, (a, b) -> a.optString("name").compareTo(b.optString("name")));
+            } catch (Exception ignored) {
+                // Display a retry action in the group tab.
             }
+            runOnUiThread(() -> {
+                if (isDestroyed()) return;
+                groupsLoading = false;
+                if (!entries.isEmpty()) groupCatalog = entries;
+                if (groupResults == null) return;
+                if (groupCatalog != null) renderGroups(groupSearch.getText().toString());
+                else {
+                    groupResults.removeAllViews();
+                    groupResults.addView(label("Не удалось загрузить группы", 16, ink, true));
+                    LinearLayout actions = new LinearLayout(this);
+                    button(actions, "Повторить", "Загрузить список групп", this::loadGroups);
+                    groupResults.addView(actions);
+                }
+            });
         }).start();
+    }
+
+    private String groupQuery(String value) {
+        return value.toLowerCase(Locale.ROOT).replaceAll("[^\\p{L}\\p{Nd}]", "");
+    }
+
+    private void renderGroups(String query) {
+        groupResults.removeAllViews();
+        String filter = groupQuery(query);
+        for (JSONObject group : groupCatalog) {
+            String name = group.optString("name");
+            if (!groupQuery(name).contains(filter) && !groupQuery(group.optString("shortname")).contains(filter)) continue;
+            boolean selected = groupId.equals(group.optString("id"));
+            TextView row = label(selected ? name + "  ✓" : name, 17, selected ? accent : ink, true);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(dp(16), dp(12), dp(16), dp(12));
+            row.setMinHeight(dp(52));
+            row.setBackground(new RippleDrawable(ColorStateList.valueOf(0x447698dc), panelShape(selected), null));
+            row.setOnClickListener(v -> {
+                groupId = group.optString("id");
+                groupName = name;
+                getPreferences(MODE_PRIVATE).edit().putString("groupId", groupId)
+                    .putString("groupName", groupName).apply();
+                date.setTimeInMillis(System.currentTimeMillis());
+                showTab(false);
+                LessonAlerts.refreshReminders(this);
+                load();
+                requestInitialNotifications();
+            });
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
+            params.bottomMargin = dp(7);
+            groupResults.addView(row, params);
+        }
+        if (groupResults.getChildCount() == 0) {
+            groupResults.addView(label("Группы не найдены", 16, muted, false));
+        }
+    }
+
+    private GradientDrawable panelShape(boolean selected) {
+        int top = selected ? (dark ? 0xff2c4669 : 0xffe3eeff) : (dark ? 0xff23344d : Color.WHITE);
+        int bottom = selected ? (dark ? 0xff20324e : 0xffcedfff) : surface;
+        GradientDrawable shape = new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
+            new int[]{top, bottom});
+        shape.setCornerRadius(dp(16));
+        shape.setStroke(dp(1), dark ? 0xff435777 : 0xffcfdef2);
+        return shape;
     }
 
     private void load() {
@@ -646,7 +823,10 @@ public class MainActivity extends Activity {
         if (groupId.isEmpty()) {
             week.setText("Группа не выбрана");
             days.removeAllViews();
-            days.addView(label("Выбери «Группа» в меню ☰, чтобы открыть расписание.", 16, muted, false));
+            days.addView(label("Выбери группу, чтобы открыть расписание.", 16, muted, false));
+            LinearLayout actions = new LinearLayout(this);
+            button(actions, "Выбрать группу", "Открыть группы", this::chooseGroup);
+            days.addView(actions);
             return;
         }
         if (dayOnly) date.setTimeInMillis(System.currentTimeMillis());
