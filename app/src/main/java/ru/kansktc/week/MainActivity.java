@@ -451,6 +451,15 @@ public class MainActivity extends Activity {
         });
         save.setSelected(true);
         page.addView(actions);
+        try {
+            String version = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+            TextView versionLabel = label("Версия " + version, 11, muted, false);
+            versionLabel.setGravity(Gravity.CENTER);
+            versionLabel.setPadding(0, dp(2), 0, dp(8));
+            page.addView(versionLabel, new LinearLayout.LayoutParams(-1, -2));
+        } catch (android.content.pm.PackageManager.NameNotFoundException ignored) {
+            // This footer is optional if package information is unavailable.
+        }
     }
 
     private LinearLayout settingsPanel(LinearLayout parent, String title) {
