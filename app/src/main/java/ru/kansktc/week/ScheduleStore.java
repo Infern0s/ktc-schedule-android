@@ -41,6 +41,12 @@ final class ScheduleStore {
         }
     }
 
+    static boolean isFresh(Context context, String key, int minutes) {
+        long time = context.getSharedPreferences("schedule", Context.MODE_PRIVATE).getLong(key + ":time", 0);
+        long elapsed = System.currentTimeMillis() - time;
+        return elapsed >= 0 && elapsed < minutes * 60_000L;
+    }
+
     static JSONArray sync(Context context, String group, Date date, boolean force) throws Exception {
         String key = weekKey(group, date);
         synchronized (SYNC_LOCK) {

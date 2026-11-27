@@ -1,0 +1,14 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Пары КТК · Telegram",
+      "type": "node",
+      "request": "launch",
+      "program": "${workspaceFolder}/bot/bot.mjs",
+      "cwd": "${workspaceFolder}/bot",
+      "envFile": "${workspaceFolder}/bot/.env",
+      "console": "integratedTerminal"
+    }
+  ]
+}

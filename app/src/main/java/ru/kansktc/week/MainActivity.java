@@ -316,9 +316,9 @@ public class MainActivity extends Activity {
         body.setPadding(dp(16), dp(10), dp(16), dp(12));
         body.setBackground(glass(0xff344f75, 0xff192940));
         String updateLabel = availableUpdate == null ? "Обновление приложения" : "Обновить до " + availableUpdate.version;
-        String[] labels = {"Расписание", "Оценки", "Группа", "Обновить расписание", updateLabel,
+        String[] labels = {"Расписание", "Оценки", "Группа", "Преподаватели", "Обновить расписание", updateLabel,
             dark ? "Светлая тема" : "Тёмная тема", "Настройки"};
-        Runnable[] actions = {() -> showTab(false), () -> showTab(true), this::chooseGroup, () -> {
+        Runnable[] actions = {() -> showTab(false), () -> showTab(true), this::chooseGroup, () -> showTeachers(new Date(), null), () -> {
             if (auxiliaryPage != null) showTab(false);
             if (gradesVisible) loadJournal(journalUrl);
             else loadSchedule(true, true);
@@ -815,6 +815,137 @@ public class MainActivity extends Activity {
         backButton.setVisibility(View.GONE);
     }
 
+    private void showTeachers(Date date, String selectedId) {
+        LinearLayout page = column();
+        page.setPadding(dp(16), dp(12), dp(16), 0);
+        page.setFocusableInTouchMode(true);
+        showAuxiliary("Преподаватели", page);
+        LinearLayout navigation = new LinearLayout(this);
+        button(navigation, "‹", "Предыдущая неделя", () -> moveTeacherWeek(date, -1, selectedId));
+        button(navigation, "Эта неделя", "Текущая неделя", () -> showTeachers(new Date(), selectedId));
+        button(navigation, "›", "Следующая неделя", () -> moveTeacherWeek(date, 1, selectedId));
+        page.addView(navigation);
+        if (selectedId != null) {
+            LinearLayout listAction = new LinearLayout(this);
+            button(listAction, "К списку", "Список преподавателей", () -> showTeachers(date, null));
+            page.addView(listAction);
+        }
+        Calendar monday = Calendar.getInstance(zone);
+        monday.setTime(date);
+        monday.add(Calendar.DAY_OF_YEAR, -((monday.get(Calendar.DAY_OF_WEEK) + 5) % 7));
+        TextView range = label("Неделя с " + format("d MMMM", monday.getTime()), 15, muted, false);
+        range.setPadding(dp(3), dp(5), 0, dp(8));
+        page.addView(range);
+        EditText filter = new EditText(this);
+        if (selectedId == null) {
+            filter.setSingleLine();
+            filter.setTextColor(ink);
+            filter.setHintTextColor(muted);
+            filter.setHint("Поиск по фамилии");
+            filter.setPadding(dp(14), dp(10), dp(14), dp(10));
+            filter.setBackground(panelShape(false));
+            page.addView(filter);
+        }
+        ScrollView list = new ScrollView(this);
+        LinearLayout results = column();
+        results.setPadding(0, dp(10), 0, dp(16));
+        list.addView(results);
+        page.addView(list, new LinearLayout.LayoutParams(-1, 0, 1));
+        page.requestFocus();
+        results.addView(label("Загружаю расписание преподавателей…", 15, muted, false));
+        new Thread(() -> {
+            try {
+                TeacherTimetable.Week week = TeacherTimetable.load(getApplicationContext(), date);
+                runOnUiThread(() -> {
+                    if (isDestroyed() || auxiliaryPage != page) return;
+                    if (selectedId == null) {
+                        renderTeachers(results, week, date, filter.getText().toString());
+                        filter.addTextChangedListener(new android.text.TextWatcher() {
+                            @Override public void beforeTextChanged(CharSequence text, int a, int b, int c) { }
+                            @Override public void afterTextChanged(android.text.Editable text) { }
+                            @Override public void onTextChanged(CharSequence text, int a, int b, int c) {
+                                renderTeachers(results, week, date, text.toString());
+                            }
+                        });
+                    } else {
+                        renderTeacherWeek(results, week, selectedId);
+                    }
+                });
+            } catch (Exception error) {
+                runOnUiThread(() -> {
+                    if (isDestroyed() || auxiliaryPage != page) return;
+                    results.removeAllViews();
+                    results.addView(label("Не удалось загрузить расписание преподавателей", 17, ink, true));
+                    LinearLayout retry = new LinearLayout(this);
+                    button(retry, "Повторить", "Повторить загрузку", () -> showTeachers(date, selectedId));
+                    results.addView(retry);
+                });
+            }
+        }).start();
+    }
+
+    private void moveTeacherWeek(Date date, int direction, String selectedId) {
+        Calendar requested = Calendar.getInstance(zone);
+        requested.setTime(date);
+        requested.add(Calendar.DAY_OF_YEAR, direction * 7);
+        showTeachers(requested.getTime(), selectedId);
+    }
+
+    private void renderTeachers(LinearLayout results, TeacherTimetable.Week week, Date date, String query) {
+        results.removeAllViews();
+        String filter = groupQuery(query);
+        Map<String, Integer> counts = new HashMap<>();
+        for (TeacherTimetable.Teacher teacher : week.teachers) {
+            counts.put(teacher.name, counts.containsKey(teacher.name) ? counts.get(teacher.name) + 1 : 1);
+        }
+        for (TeacherTimetable.Teacher teacher : week.teachers) {
+            if (!groupQuery(teacher.name).contains(filter)) continue;
+            String name = counts.get(teacher.name) > 1 ? teacher.name + " · " + teacher.id : teacher.name;
+            TextView row = label(name, 17, ink, true);
+            row.setPadding(dp(14), dp(13), dp(14), dp(13));
+            row.setMinHeight(dp(48));
+            row.setBackground(new RippleDrawable(ColorStateList.valueOf(0x447698dc), panelShape(false), null));
+            row.setOnClickListener(v -> {
+                getSystemService(android.view.inputmethod.InputMethodManager.class)
+                    .hideSoftInputFromWindow(v.getWindowToken(), 0);
+                showTeachers(date, teacher.id);
+            });
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2);
+            params.bottomMargin = dp(7);
+            results.addView(row, params);
+        }
+        if (results.getChildCount() == 0) results.addView(label("Преподаватели не найдены", 16, muted, false));
+        if (week.failedGroups > 0) results.addView(label("Часть расписаний пока недоступна", 14, muted, false));
+    }
+
+    private void renderTeacherWeek(LinearLayout results, TeacherTimetable.Week week, String selectedId) {
+        results.removeAllViews();
+        TeacherTimetable.Teacher teacher = null;
+        for (TeacherTimetable.Teacher entry : week.teachers) {
+            if (entry.id.equals(selectedId)) {
+                teacher = entry;
+                break;
+            }
+        }
+        if (teacher != null) {
+            results.addView(label(teacher.name, 22, ink, true));
+            String previous = "";
+            for (JSONObject item : teacher.lessons) {
+                String day = item.optString("date");
+                if (!day.equals(previous)) {
+                    TextView title = label(day, 16, accent, true);
+                    title.setPadding(dp(3), dp(12), 0, 0);
+                    results.addView(title);
+                    previous = day;
+                }
+                addCard(results, item, day, item.optString("replacementOf", null), false);
+            }
+        } else {
+            results.addView(label("На этой неделе пар не найдено", 17, ink, true));
+        }
+        if (week.failedGroups > 0) results.addView(label("Часть расписаний пока недоступна", 14, muted, false));
+    }
+
     private void chooseGroup() {
         LinearLayout page = column();
         page.setPadding(dp(16), dp(16), dp(16), 0);
@@ -1094,6 +1225,10 @@ public class MainActivity extends Activity {
     }
 
     private void addCard(LinearLayout panel, JSONObject item, String dayDate, String original) {
+        addCard(panel, item, dayDate, original, true);
+    }
+
+    private void addCard(LinearLayout panel, JSONObject item, String dayDate, String original, boolean highlight) {
         LinearLayout card = column();
         card.setPadding(dp(15), dp(12), dp(15), dp(12));
         GradientDrawable background = new GradientDrawable();
@@ -1106,7 +1241,7 @@ public class MainActivity extends Activity {
             + item.optString("lesson_start") + "–" + item.optString("lesson_end");
         TextView timeLabel = label(time, 13, accent, true);
         card.addView(timeLabel);
-        if (item.optInt("cancel") != 1) {
+        if (highlight && item.optInt("cancel") != 1) {
             lessonHighlights.add(new LessonHighlight(card, background, dayDate,
                 minutes(item.optString("lesson_start")), minutes(item.optString("lesson_end")),
                 timeLabel, time));
@@ -1118,6 +1253,8 @@ public class MainActivity extends Activity {
         String room = item.optString("classroom", "");
         if (!room.isEmpty()) teacher += (teacher.isEmpty() ? "" : "  ·  ") + "Ауд. " + room;
         if (!teacher.isEmpty()) card.addView(label(teacher, 14, muted, false));
+        String group = item.optString("groupName");
+        if (!group.isEmpty()) card.addView(label(group, 14, accent, true));
         if (original != null) {
             TextView previous = label("Было: " + original, 13, muted, false);
             previous.setPadding(0, dp(7), 0, 0);
