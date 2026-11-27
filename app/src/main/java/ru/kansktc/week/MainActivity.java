@@ -86,6 +86,8 @@ public class MainActivity extends Activity {
     private TextView week;
     private int generation;
     private boolean foreground;
+    private boolean checkingUpdate, downloadingUpdate, installPermissionPending;
+    private AppUpdates.Release availableUpdate;
     private boolean exactSettingsOpened;
     private boolean syncInFlight;
     private TextView screenTitle;
@@ -173,12 +175,110 @@ public class MainActivity extends Activity {
         LessonAlerts.refreshReminders(this);
         if (!groupId.isEmpty()) requestInitialNotifications();
         if (state != null && state.getBoolean("gradesVisible")) showTab(true);
+        installPermissionPending = state != null && state.getBoolean("installPermissionPending");
+        if (state == null) checkForUpdates(false);
     }
 
     @Override protected void onSaveInstanceState(Bundle state) {
         state.putLong("date", date.getTimeInMillis());
         state.putBoolean("gradesVisible", gradesVisible);
+        state.putBoolean("installPermissionPending", installPermissionPending);
         super.onSaveInstanceState(state);
+    }
+
+    private void checkForUpdates(boolean manual) {
+        if (checkingUpdate || downloadingUpdate) {
+            if (manual) Toast.makeText(this, "Обновление уже проверяется или скачивается", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (manual && availableUpdate != null) {
+            offerUpdate(availableUpdate);
+            return;
+        }
+        checkingUpdate = true;
+        new Thread(() -> {
+            try {
+                AppUpdates.Release release = AppUpdates.check(getApplicationContext());
+                runOnUiThread(() -> {
+                    checkingUpdate = false;
+                    if (isDestroyed() || isFinishing()) return;
+                    availableUpdate = release;
+                    if (release == null) {
+                        if (manual) Toast.makeText(this, "Установлена последняя версия", Toast.LENGTH_SHORT).show();
+                    } else if (foreground && (manual || !release.version.equals(
+                            getPreferences(MODE_PRIVATE).getString("deferredUpdate", "")))) {
+                        offerUpdate(release);
+                    }
+                });
+            } catch (Exception error) {
+                runOnUiThread(() -> {
+                    checkingUpdate = false;
+                    if (manual && !isFinishing() && !isDestroyed()) {
+                        Toast.makeText(this, "Не удалось проверить GitHub. Попробуй позже.", Toast.LENGTH_LONG).show();
+                    }
+                });
+            }
+        }).start();
+    }
+
+    private void offerUpdate(AppUpdates.Release release) {
+        new android.app.AlertDialog.Builder(this).setTitle("Доступна версия " + release.version)
+            .setMessage("Скачать обновление из GitHub и открыть установщик Android?")
+            .setNegativeButton("Позже", (dialog, which) -> getPreferences(MODE_PRIVATE).edit()
+                .putString("deferredUpdate", release.version).apply())
+            .setPositiveButton("Обновить", (dialog, which) -> downloadUpdate(release))
+            .show();
+    }
+
+    private void downloadUpdate(AppUpdates.Release release) {
+        if (downloadingUpdate) return;
+        downloadingUpdate = true;
+        Toast.makeText(this, "Скачиваю версию " + release.version + "…", Toast.LENGTH_SHORT).show();
+        new Thread(() -> {
+            try {
+                AppUpdates.download(getApplicationContext(), release);
+                runOnUiThread(() -> {
+                    downloadingUpdate = false;
+                    if (!isDestroyed() && !isFinishing()) openDownloadedUpdate(true);
+                });
+            } catch (Exception error) {
+                runOnUiThread(() -> {
+                    downloadingUpdate = false;
+                    if (!isDestroyed() && !isFinishing()) {
+                        Toast.makeText(this, "Не удалось скачать или проверить APK", Toast.LENGTH_LONG).show();
+                    }
+                });
+            }
+        }).start();
+    }
+
+    private void openDownloadedUpdate(boolean askPermission) {
+        if (!AppUpdates.apk(this).isFile()) return;
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= 26 && !getPackageManager().canRequestPackageInstalls()) {
+                if (askPermission) {
+                    new android.app.AlertDialog.Builder(this).setTitle("Разрешение на установку")
+                        .setMessage("Android попросит разрешить «Парам КТК» открыть скачанное обновление.")
+                        .setNegativeButton("Позже", null).setPositiveButton("Открыть настройки", (dialog, which) -> {
+                            installPermissionPending = true;
+                            try {
+                                startActivity(new android.content.Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                    Uri.parse("package:" + getPackageName())));
+                            } catch (android.content.ActivityNotFoundException unavailable) {
+                                installPermissionPending = false;
+                                Toast.makeText(this, "Настройка установки недоступна", Toast.LENGTH_LONG).show();
+                            }
+                        }).show();
+                }
+                return;
+            }
+            android.content.Intent install = new android.content.Intent(android.content.Intent.ACTION_VIEW);
+            install.setDataAndType(UpdateProvider.uri(this), UpdateProvider.MIME);
+            install.addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivity(install);
+        } catch (android.content.ActivityNotFoundException | SecurityException error) {
+            Toast.makeText(this, "Не удалось открыть установщик Android", Toast.LENGTH_LONG).show();
+        }
     }
 
     private void openMenu() {
@@ -215,13 +315,14 @@ public class MainActivity extends Activity {
         AnimatedMenu menu = new AnimatedMenu();
         body.setPadding(dp(16), dp(10), dp(16), dp(12));
         body.setBackground(glass(0xff344f75, 0xff192940));
-        String[] labels = {"Расписание", "Оценки", "Группа", "Обновить",
+        String updateLabel = availableUpdate == null ? "Обновление приложения" : "Обновить до " + availableUpdate.version;
+        String[] labels = {"Расписание", "Оценки", "Группа", "Обновить расписание", updateLabel,
             dark ? "Светлая тема" : "Тёмная тема", "Настройки"};
         Runnable[] actions = {() -> showTab(false), () -> showTab(true), this::chooseGroup, () -> {
             if (auxiliaryPage != null) showTab(false);
             if (gradesVisible) loadJournal(journalUrl);
             else loadSchedule(true, true);
-        }, () -> {
+        }, () -> checkForUpdates(true), () -> {
             getPreferences(MODE_PRIVATE).edit().putBoolean("darkTheme", !dark).apply();
             recreate();
         }, this::showSettings};
@@ -626,6 +727,10 @@ public class MainActivity extends Activity {
     @Override protected void onResume() {
         super.onResume();
         foreground = true;
+        if (installPermissionPending) {
+            installPermissionPending = false;
+            openDownloadedUpdate(false);
+        }
         if (exactSettingsOpened) {
             exactSettingsOpened = false;
             LessonAlerts.refreshReminders(this);
